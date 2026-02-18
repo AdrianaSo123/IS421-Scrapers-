@@ -1,0 +1,60 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+
+# Environment Variables
+.env
+
+# MacOS
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+
+# Project Specific Data & Output
+data/
+verification_data/
+processed_urls.json
+output/
+capital_events_final/
+capital_events_output/
+final_test_output/
+live_test_output*/
+output_test/
+verification_output/
+*.jsonl
+
+# Logs and Reports
+*.log
+*_report.txt
+
+# Bundles (generated files)
+all_code.txt
+all_text.txt
