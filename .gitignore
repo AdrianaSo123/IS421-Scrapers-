@@ -58,3 +58,4 @@ verification_output/
 # Bundles (generated files)
 all_code.txt
 all_text.txt
+docker_output/
