@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  hackernews-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.hackernews
+    container_name: hackernews-scheduler
+    restart: unless-stopped
+    environment:
+      CRON_SCHEDULE: ${HN_CRON_SCHEDULE:-0 */12 * * *}
+      SCRAPER_COMMAND: "ai-hn --limit 60 --output /data/ingestion_output"
+      TZ: ${TZ:-UTC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DB_PATH: /data/scrapers.db
+    volumes:
+      - scraper_data:/data
+
+  techcrunch-scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile.techcrunch
+    container_name: techcrunch-scheduler
+    restart: unless-stopped
+    environment:
+      CRON_SCHEDULE: ${TC_CRON_SCHEDULE:-0 8 * * *}
+      SCRAPER_COMMAND: "ai-techcrunch --limit 20 --output /data/ingestion_output"
+      TZ: ${TZ:-UTC}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DB_PATH: /data/scrapers.db
+    volumes:
+      - scraper_data:/data
+
+volumes:
+  scraper_data:
+    name: scraper_data

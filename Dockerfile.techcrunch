@@ -6,6 +6,7 @@ WORKDIR /app
 # Install system dependencies if any (none strictly needed for current packages, but good practice for slim)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cron \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install core intelligence module
@@ -16,5 +17,9 @@ RUN pip install --no-cache-dir -e /app/ai_intel_processing
 COPY ai_techcrunch_ingest /app/ai_techcrunch_ingest
 RUN pip install --no-cache-dir -e /app/ai_techcrunch_ingest
 
+# Copy scripts
+COPY scripts /app/scripts
+RUN chmod +x /app/scripts/cron/entrypoint.sh
+
 # Set entrypoint
-ENTRYPOINT ["ai-techcrunch"]
+ENTRYPOINT ["/app/scripts/cron/entrypoint.sh"]
