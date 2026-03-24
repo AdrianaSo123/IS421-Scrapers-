@@ -23,6 +23,7 @@ def fetch_article(url: str, session: Optional[requests.Session] = None) -> Tuple
     """
     if session is None:
         session = requests.Session()
+        session.headers.update({"User-Agent": "AI_Ingest_Bot/1.0"})
 
     for attempt in range(MAX_RETRIES):
         try:
