@@ -17,21 +17,12 @@ def dedup_store():
 def test_url_normalization(dedup_store):
     url1 = "https://Example.com/Foo?utm_source=bar"
     url2 = "https://example.com/foo?utm_source=bar"
-    # Note: My implementation currently keeps query params but lowercases scheme/netloc
-    # Let's verify what it actually does.
-    # _normalize_url lowercases scheme/netloc. Path? 
-    # urlunparse documentation says it puts it back together. 
-    # scheme, netloc, url, params, query, fragment
     
     norm1 = dedup_store._normalize_url(url1)
     norm2 = dedup_store._normalize_url(url2)
     
-    # Python's urlparse might not lowercase path by default? 
-    # Actually standard is path is case-sensitive.
-    # My implementation: scheme.lower(), netloc.lower(), path...
-    # So https://Example.com/Foo -> https://example.com/Foo
-    
-    assert norm1 == "https://example.com/Foo?utm_source=bar"
+    assert norm1 == "https://example.com/Foo"
+    assert norm2 == "https://example.com/foo"
 
 def test_hashing_consistency(dedup_store):
     url = "https://techcrunch.com/article"

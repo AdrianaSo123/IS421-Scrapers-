@@ -61,7 +61,5 @@ def test_process_article_llm_failure():
             content="Content"
         )
         
-        output = processor.process_article(article)
-        
-        assert output.company is None
-        assert output.summary == "Analysis failed or content unavailable."
+        with pytest.raises(RuntimeError, match="LLM returned no analysis"):
+            processor.process_article(article)

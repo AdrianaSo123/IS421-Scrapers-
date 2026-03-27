@@ -37,6 +37,11 @@ def get_deterministic_hash(record: Dict[str, Any], mode: str) -> str:
     return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
 
 def verify_determinism(file1: str, file2: str, mode: str):
+    """
+    Note: The system is "deterministic where possible". 
+    External dependencies like OpenAI generation (even with seed and temp=0) and live RSS feeds are not strictly deterministic.
+    The 'ingestion' mode restricts verification to raw pipelines specifically avoiding the LLM boundaries.
+    """
     print(f"Comparing {file1} and {file2} in mode: {mode}...")
     
     records1 = load_jsonl(file1)

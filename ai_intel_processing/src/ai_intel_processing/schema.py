@@ -77,3 +77,10 @@ class InvestmentAnalysis(BaseModel):
     summary: str = Field(..., description="Concise summary of the article")
     investment_relevant: bool = Field(..., description="Whether the article is relevant to AI investment")
     event_type: Literal["funding", "acquisition", "partnership", "contract", "restructuring", "other"] = Field(..., description="Classification of the event")
+
+class IngestionResult(BaseModel):
+    """Strict contract enforcing ingestion routine status reporting."""
+    status: str
+    processed: int
+    errors: int
+    message: Optional[str] = None

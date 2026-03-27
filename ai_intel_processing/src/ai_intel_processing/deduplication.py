@@ -3,14 +3,15 @@ import json
 import os
 import logging
 from typing import Set, Optional
-from urllib.parse import urlparse, urlunparse
-
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from .utils import setup_logger, log_struct
 
 logger = setup_logger("ai_intel_processing.deduplication")
 
 class DeduplicationStore:
-    def __init__(self, storage_path: str = "./data/processed_urls.json"):
+    def __init__(self, storage_path: str = None):
+        if storage_path is None:
+            storage_path = os.path.join(os.environ.get("DATA_DIR", "./data"), "processed_urls.json")
         self.storage_path = storage_path
         self.seen_hashes: Set[str] = set()
         self._load_store()
@@ -19,18 +20,26 @@ class DeduplicationStore:
         """
         Normalizes a URL for consistent hashing.
         - Lowercases scheme and netloc
-        - Removes tracking parameters (utm_*, etc.) - keeping it simple for now by stripping query params entirely if appropriate, 
-          but for news sites, query params often matter (e.g. ?id=123). 
-          Let's just lower case scheme/netloc and strip fragments.
+        - Removes tracking parameters (utm_*, etc.)
+        - Removes trailing slashes
+        - Drops fragment
         """
         parsed = urlparse(url)
-        # Reconstruct without fragment
+        
+        # Strip utm_ params from query
+        query_params = parse_qsl(parsed.query, keep_blank_values=True)
+        filtered_query = [(k, v) for k, v in query_params if not k.lower().startswith('utm_')]
+        new_query = urlencode(filtered_query)
+        
+        # Strip trailing slash from path
+        new_path = parsed.path.rstrip('/') if parsed.path != '/' else parsed.path
+        
         normalized = urlunparse((
             parsed.scheme.lower(), 
             parsed.netloc.lower(), 
-            parsed.path, 
+            new_path, 
             parsed.params, 
-            parsed.query, 
+            new_query, 
             "" # Drop fragment
         ))
         return normalized

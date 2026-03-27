@@ -54,7 +54,7 @@ def mcp_tool_wrapper(func: Callable) -> Callable:
             return ToolResponse(
                 success=False,
                 data=None, 
-                error=f"Uncaught Server Exception: {str(e)}",
+                error="Internal server error occurred",
                 execution_time_ms=duration,
                 source=tool_name
             )

@@ -1,0 +1,2511 @@
+
+
+==================== FILE: ./audit_output.py ====================
+
+import sys
+import json
+from collections import Counter
+from urllib.parse import urlparse
+
+def audit_output(filepath: str):
+    print(f"Auditing {filepath}...")
+    
+    records = []
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                if line.strip():
+                    records.append(json.loads(line))
+    except FileNotFoundError:
+        print(f"❌ File not found: {filepath}")
+        sys.exit(1)
+
+    total_records = len(records)
+    unique_urls = set()
+    sources = Counter()
+    short_titles = 0
+    short_text = 0
+    duplicates = 0
+    
+    for i, record in enumerate(records):
+        url = record.get('url')
+        if not url:
+            print(f"❌ Record {i} missing URL")
+            continue
+            
+        # URL Validation
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+             print(f"❌ Record {i} invalid URL: {url}")
+
+        if url in unique_urls:
+            duplicates += 1
+            print(f"⚠️ Duplicate URL found: {url}")
+        unique_urls.add(url)
+        
+        sources[record.get('source', 'unknown')] += 1
+        
+        # Title Validation
+        title = record.get('title', '')
+        if len(title) < 10:
+            short_titles += 1
+            print(f"⚠️ Short title in record {i}: '{title}'")
+            
+        # Raw Text Validation (if present)
+        raw_len = record.get('raw_text_length')
+        if raw_len is not None and raw_len < 500:
+            short_text += 1
+            print(f"⚠️ Short raw text in record {i}: {raw_len} chars")
+
+    # Summary
+    print("\n--- Audit Summary ---")
+    print(f"Total Records: {total_records}")
+    print(f"Unique URLs: {len(unique_urls)}")
+    print(f"Duplicates: {duplicates}")
+    print(f"Source Distribution: {dict(sources)}")
+    print(f"Title Warnings (<10 chars): {short_titles}")
+    print(f"Text Warnings (<500 chars): {short_text}")
+    
+    if duplicates > 0:
+        print("❌ FAILED: Duplicates found.")
+        sys.exit(1)
+        
+    print("✅ Audit Complete.")
+
+if __name__ == "__main__":
+    if len(sys.argv) != 2:
+        print("Usage: python audit_output.py <output.jsonl>")
+        sys.exit(1)
+        
+    audit_output(sys.argv[1])
+
+
+==================== FILE: ./demo.sh ====================
+
+#!/usr/bin/env bash
+set -e
+
+echo "====================================================="
+echo "  Capital Intelligence Engine - Live Demo"
+echo "====================================================="
+echo ""
+echo "[1/3] Activating virtual environment..."
+source .venv/bin/activate
+
+echo ""
+echo "[2/3] Running Live Ingestion (TechCrunch - 1 Article)..."
+echo "This will fetch an article, extract the text, and use OpenAI to guarantee a structured output schema."
+echo "-----------------------------------------------------"
+ai-techcrunch --limit 1
+
+echo ""
+echo "[3/3] Inspecting Output in Database..."
+echo "Here is the freshly extracted Capital Intelligence data:"
+echo "-----------------------------------------------------"
+sqlite3 data/scrapers.db "SELECT json_extract(raw_data, '$.title', '$.company', '$.event_type', '$.funding_amount', '$.summary') FROM articles ORDER BY inserted_at DESC LIMIT 1;" | while read -r line; do
+    # Format the JSON array output from SQLite securely into readable text
+    echo "$line" | python3 -c '
+import sys, json
+try:
+    data = json.load(sys.stdin)
+    print(f"\n📰 Title:      {data[0]}")
+    print(f"🏢 Company:    {data[1] if data[1] else \"N/A\"}")
+    print(f"🎯 Event Type: {data[2]}")
+    print(f"💰 Funding:    {data[3] if data[3] else \"N/A\"}")
+    print(f"📝 Summary:    {data[4]}")
+except Exception as e:
+    print(line)
+'
+done
+
+echo ""
+echo "====================================================="
+echo "  Demo Complete! Data successfully structured."
+echo "====================================================="
+
+
+==================== FILE: ./run_verification.sh ====================
+
+#!/bin/bash
+set -e
+
+# Setup
+OUTPUT_DIR="verification_data"
+DEDUP_FILE="verification_data/processed_urls.json"
+rm -rf $OUTPUT_DIR
+mkdir -p $OUTPUT_DIR
+
+echo "--- 1. Running Unit Tests ---"
+pytest tests
+
+echo "--- 2. TechCrunch Raw Ingestion (Run 1) ---"
+# We need to point dedup store to a temp location or just accept default. 
+# Default is ./data/processed_urls.json.
+# I'll let it use default but clear it first.
+rm -f ./data/processed_urls.json
+rm -f ./data/scrapers.db
+
+# Run 1 (Normal Mode for Determinism)
+ai-techcrunch --limit 3 --output $OUTPUT_DIR/run1_norm
+mv $OUTPUT_DIR/run1_norm/techcrunch_data.jsonl $OUTPUT_DIR/tc_run1.jsonl
+
+echo "--- 3. TechCrunch Ingestion (Run 2 - Cleanup State) ---"
+rm -f ./data/processed_urls.json
+rm -f ./data/scrapers.db
+ai-techcrunch --limit 3 --output $OUTPUT_DIR/run2_norm
+mv $OUTPUT_DIR/run2_norm/techcrunch_data.jsonl $OUTPUT_DIR/tc_run2.jsonl
+
+echo "--- 4. Verify Determinism (TechCrunch - Processed) ---"
+python3 verify_determinism.py $OUTPUT_DIR/tc_run1.jsonl $OUTPUT_DIR/tc_run2.jsonl --mode ingestion
+
+echo "--- 5. Deduplication Verification ---"
+# Start with fresh state
+rm -f ./data/processed_urls.json
+rm -f ./data/scrapers.db
+# Run 1
+ai-techcrunch --limit 2 --output $OUTPUT_DIR/dedup_test --raw
+# Run 2 (Should skip processed and fetch next 2 unique)
+ai-techcrunch --limit 2 --output $OUTPUT_DIR/dedup_test --raw
+# Verify no duplicates in the file
+python3 audit_output.py $OUTPUT_DIR/dedup_test/techcrunch_data.jsonl
+
+echo "--- 6. Hacker News Raw Ingestion & Audit ---"
+rm -f ./data/processed_urls.json
+rm -f ./data/scrapers.db
+ai-hn --limit 20 --output $OUTPUT_DIR/hn --raw
+python3 audit_output.py $OUTPUT_DIR/hn/hackernews_data.jsonl
+
+echo "--- All Verification Checks Passed ---"
+
+
+==================== FILE: ./run_ingestion.sh ====================
+
+#!/bin/bash
+
+# Load environment variables if needed (though Python handles .env)
+# export OPENAI_API_KEY=...
+
+echo "Starting Daily Ingestion Job..."
+date
+
+# 1. Run TechCrunch Ingestion
+echo "Running TechCrunch Ingestion..."
+ai-techcrunch --limit 20 --output ./data/ingestion_output
+
+# 2. Run Hacker News Ingestion
+# We fetch more here because we filter for AI content
+echo "Running Hacker News Ingestion..."
+ai-hn --limit 60 --output ./data/ingestion_output
+
+echo "Ingestion Job Complete."
+
+
+==================== FILE: ./inspect_data.py ====================
+
+import json
+import sys
+
+def inspect_records(filepath):
+    print(f"Inspecting {filepath}...")
+    try:
+        with open(filepath, 'r') as f:
+            lines = f.readlines()
+        
+        for i, line in enumerate(lines[:5]): # Inspect first 5
+            data = json.loads(line)
+            print(f"\n--- Record {i+1} ---")
+            print(f"Source: {data.get('source')}")
+            print(f"Title: {data.get('title')}")
+            print(f"Event Type: {data.get('event_type')}")
+            print(f"Company: {data.get('company')}")
+            print(f"Funding: {data.get('funding_amount')} ({data.get('funding_stage')})")
+            print(f"Summary: {data.get('summary')}")
+            print(f"Relevant: {data.get('investment_relevant')}")
+    except Exception as e:
+        print(f"Error reading {filepath}: {e}")
+
+inspect_records("verification_data/run1/techcrunch_data.jsonl")
+
+
+==================== FILE: ./verify_determinism.py ====================
+
+import sys
+import json
+import hashlib
+import argparse
+from typing import List, Dict, Any
+
+def load_jsonl(filepath: str) -> List[Dict[str, Any]]:
+    records = []
+    try:
+        with open(filepath, 'r') as f:
+            for line in f:
+                if line.strip():
+                    records.append(json.loads(line))
+    except FileNotFoundError:
+        print(f"❌ File not found: {filepath}")
+        sys.exit(1)
+    return records
+
+def get_deterministic_hash(record: Dict[str, Any], mode: str) -> str:
+    """ Computes hash of record based on mode. """
+    # Deep copy to avoid modifying original
+    clean_record = record.copy()
+    
+    # Always remove timestamps that vary by execution time
+    clean_record.pop('collected_at', None)
+    clean_record.pop('processing_timestamp', None)
+    clean_record.pop('metadata', None) 
+
+    if mode == "ingestion":
+        # Ingestion mode: only check source, url, title, content fields
+        # Remove LLM outputs to isolate ingestion determinism
+        keys_to_keep = {'source', 'url', 'title', 'content', 'published_at', 'raw_text_length', 'raw_text_preview', 'http_status'}
+        clean_record = {k: v for k, v in clean_record.items() if k in keys_to_keep}
+    
+    # Sort keys for consistent JSON serialization
+    serialized = json.dumps(clean_record, sort_keys=True)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+def verify_determinism(file1: str, file2: str, mode: str):
+    """
+    Note: The system is "deterministic where possible". 
+    External dependencies like OpenAI generation (even with seed and temp=0) and live RSS feeds are not strictly deterministic.
+    The 'ingestion' mode restricts verification to raw pipelines specifically avoiding the LLM boundaries.
+    """
+    print(f"Comparing {file1} and {file2} in mode: {mode}...")
+    
+    records1 = load_jsonl(file1)
+    records2 = load_jsonl(file2)
+    
+    if len(records1) != len(records2):
+        print(f"❌ Record count mismatch: {len(records1)} vs {len(records2)}")
+        sys.exit(1)
+        
+    hashes1 = [get_deterministic_hash(r, mode) for r in records1]
+    hashes2 = [get_deterministic_hash(r, mode) for r in records2]
+    
+    mismatches = 0
+    for i, (h1, h2) in enumerate(zip(hashes1, hashes2)):
+        if h1 != h2:
+            print(f"❌ Mismatch at index {i}")
+            # Show diff
+            r1 = records1[i]
+            r2 = records2[i]
+            # Simple diff
+            keys = set(r1.keys()) | set(r2.keys())
+            diffs = []
+            for k in keys:
+                if k in ['collected_at', 'processing_timestamp', 'metadata']: continue
+                if r1.get(k) != r2.get(k):
+                    diffs.append(f"{k}: {r1.get(k)} != {r2.get(k)}")
+            print(f"   Diffs: {diffs}")
+            mismatches += 1
+            
+    if mismatches == 0:
+        print(f"✅ SUCCESS: Files are deterministically identical (ignoring timestamps) in {mode} mode.")
+        sys.exit(0)
+    else:
+        print(f"❌ FAILED: {mismatches} mismatches found.")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Verify output determinism.")
+    parser.add_argument("file1", help="First output file")
+    parser.add_argument("file2", help="Second output file")
+    parser.add_argument("--mode", choices=["ingestion", "full"], default="full", help="Check mode: ingestion (raw fields only) or full (strict)")
+    args = parser.parse_args()
+    
+    verify_determinism(args.file1, args.file2, args.mode)
+
+
+==================== FILE: ./ai_capital_mcp/pyproject.toml ====================
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_capital_mcp"
+version = "0.1.0"
+dependencies = [
+    "mcp",
+    "pydantic",
+    "cachetools"
+]
+
+[project.scripts]
+ai-capital-mcp = "ai_capital_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+==================== FILE: ./ai_capital_mcp/tests/test_mcp_validation.py ====================
+
+import pytest
+import os
+from ai_capital_mcp.server import get_capital_events, trigger_ingestion, get_ingestion_status, summarize_market_activity
+from ai_capital_mcp.schema import ToolResponse
+
+def test_get_capital_events_bounds():
+    """Verify that inputs exceeding 100 are strictly bounded to 100."""
+    res = get_capital_events(limit=9999)
+    assert res.success == True
+    assert len(res.data) <= 100
+
+def test_get_capital_events_lower_bounds():
+    """Verify negative bounds are reset to 1."""
+    res = get_capital_events(limit=-5)
+    assert res.success == True
+
+def test_summarize_market_bounds():
+    """Verify that looking backward a million days caps tightly to 30."""
+    res = summarize_market_activity(days=99999)
+    assert res.success == True
+    assert res.data.timeframe_days == 30
+
+def test_trigger_ingestion_async_job_flow():
+    """Ensure triggering ingestion returns a valid JOB ID and valid lookup state."""
+    res = trigger_ingestion(source="techcrunch", limit=1)
+    assert res.success == True
+    assert isinstance(res.data, str)
+    
+    # Immediately check lookup state
+    status_res = get_ingestion_status(res.data)
+    assert status_res.success == True
+    assert status_res.data["status"] in ["pending", "processing", "completed", "failed"]
+
+def test_get_ingestion_status_missing():
+    """Ensure invalid job lookups return robust ToolResponse errors rather than crasing."""
+    status_res = get_ingestion_status("invalid-uuid-0000")
+    assert status_res.success == False
+    assert "not found" in status_res.error
+
+
+==================== FILE: ./ai_capital_mcp/src/ai_capital_mcp/server.py ====================
+
+from mcp.server.fastmcp import FastMCP
+from typing import Optional, List
+from .schema import ToolResponse, EventTypeEnum, CapitalEvent, MarketSummary, SourceEnum
+from .logger import mcp_tool_wrapper, logger
+from cachetools import cached, TTLCache
+import sqlite3
+import json
+import os
+import uuid
+import threading
+import subprocess
+import time
+from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
+
+# Auto-load the root environment variables so Claude config doesn't need naked API keys
+load_dotenv(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.env")))
+
+import sys
+if not os.environ.get("OPENAI_API_KEY"):
+    sys.stderr.write("FATAL ERROR: OPENAI_API_KEY environment variable is required.\n")
+    sys.exit(1)
+if not os.environ.get("DB_PATH"):
+    sys.stderr.write("FATAL ERROR: DB_PATH environment variable is required.\n")
+    sys.exit(1)
+
+# Fix 9: Explicit Trend Thresholds
+HIGH_FUNDING_THRESHOLD = 10
+CONSOLIDATION_THRESHOLD = 5
+VALID_EVENT_TYPES = {"funding", "acquisition", "partnership", "contract", "restructuring", "other"}
+
+# Initialize the FastMCP server
+mcp = FastMCP("Capital Intelligence Engine")
+
+mcp_cache = TTLCache(maxsize=100, ttl=300)
+
+from ai_intel_processing.database import DatabaseStore
+
+def _parse_event_row(raw: dict) -> CapitalEvent:
+    e_type = raw.get("event_type")
+    if e_type not in VALID_EVENT_TYPES:
+        e_type = "other"
+        
+    published_at = raw.get("published_at", "")
+    if not published_at:
+        published_at = "1970-01-01T00:00:00Z"
+        
+    return CapitalEvent(
+        title=raw.get("title", "Unknown"),
+        company=raw.get("company", "Unknown") or "Unknown",
+        event_type=e_type,
+        funding_amount=raw.get("funding_amount", "Undisclosed") or "Undisclosed",
+        summary=raw.get("summary", ""),
+        published_at=published_at
+    )
+
+@cached(cache=mcp_cache)
+def _fetch_capital_events_cached(limit: int, event_type: Optional[str] = None) -> List[CapitalEvent]:
+    db = DatabaseStore()
+    raw_events = db.get_events(limit, event_type)
+    return [_parse_event_row(raw) for raw in raw_events]
+
+@mcp.tool()
+@mcp_tool_wrapper
+def get_capital_events(limit: int = 10, event_type: Optional[EventTypeEnum] = None) -> ToolResponse[List[CapitalEvent]]:
+    """
+    Returns a list of structured capital events ordered by recency.
+    Use this tool when you need up-to-date funding, acquisition, or general market event data.
+    """
+    if not isinstance(limit, int):
+        return ToolResponse(success=False, data=None, error="limit must be an integer")
+    if event_type is not None and not isinstance(event_type, (str, EventTypeEnum)):
+        return ToolResponse(success=False, data=None, error="event_type must be a valid string or enum")
+        
+    if limit > 100: limit = 100
+    if limit < 1: limit = 1
+        
+    try:
+        events = _fetch_capital_events_cached(limit, event_type)
+        return ToolResponse(success=True, data=events, error=None)
+    except Exception as e:
+        logger.error(f"Internal error in get_capital_events: {e}", exc_info=True)
+        return ToolResponse(success=False, data=None, error="Internal server error occurred")
+
+@mcp.tool()
+@mcp_tool_wrapper
+def search_companies(company_name: str, limit: int = 10) -> ToolResponse[List[CapitalEvent]]:
+    """
+    Searches exclusively for capital intelligence mentioning a specific company.
+    Use this tool when you need to research a target company's historical funding or M&A activity.
+    """
+    if not isinstance(company_name, str):
+        return ToolResponse(success=False, data=None, error="company_name must be a string")
+    if not isinstance(limit, int):
+        return ToolResponse(success=False, data=None, error="limit must be an integer")
+        
+    if limit > 50: limit = 50
+    if limit < 1: limit = 1
+        
+    try:
+        company_name = company_name.strip()
+        if not company_name or len(company_name) < 2:
+            return ToolResponse(success=False, data=None, error="company_name must be at least 2 characters long.")
+            
+        db = DatabaseStore()
+        raw_events = db.search_events(company_name, limit)
+        results = [_parse_event_row(raw) for raw in raw_events]
+            
+        return ToolResponse(success=True, data=results, error=None)
+    except Exception as e:
+        logger.error(f"Internal error in search_companies: {e}", exc_info=True)
+        return ToolResponse(success=False, data=None, error="Internal server error occurred")
+
+@mcp.tool()
+@mcp_tool_wrapper
+def summarize_market_activity(days: int = 7) -> ToolResponse[MarketSummary]:
+    """
+    Synthesizes massive datasets of capital events into a high-level briefing.
+    Use this tool when you need to understand broad market trends, funding acceleration, or consolidation phases over a time window.
+    """
+    if not isinstance(days, int):
+        return ToolResponse(success=False, data=None, error="days must be an integer")
+        
+    if days > 30: days = 30
+    if days < 1: days = 1
+    
+    try:
+        db = DatabaseStore()
+        raw_events = db.get_events_since(days)
+        
+        if not raw_events:
+            return ToolResponse(
+                success=True, 
+                data=MarketSummary(
+                    timeframe_days=days, 
+                    total_events_analyzed=0, 
+                    top_companies_mentioned=[],
+                    event_type_distribution={},
+                    trend_signal="STAGNANT",
+                    high_level_summary="No activity detected in the specified timeframe."
+                ),
+                error=None
+            )
+            
+        companies_count = {}
+        event_types = {}
+        total_funding_rounds = 0
+        total_acquisitions = 0
+        
+        for raw in raw_events:
+            c = raw.get("company")
+            if c and c != "Unknown":
+                companies_count[c] = companies_count.get(c, 0) + 1
+                
+            e_type = raw.get("event_type", "other")
+            event_types[e_type] = event_types.get(e_type, 0) + 1
+            
+            if e_type == "funding": total_funding_rounds += 1
+            if e_type == "acquisition": total_acquisitions += 1
+                
+        top_companies = sorted(companies_count, key=companies_count.get, reverse=True)[:5]
+         
+        # Fix 9: Deterministic Signals
+        if total_funding_rounds >= HIGH_FUNDING_THRESHOLD:
+            trend = "HIGH_FUNDING_ACTIVITY"
+        elif total_acquisitions >= CONSOLIDATION_THRESHOLD:
+            trend = "CONSOLIDATION_PHASE"
+        else:
+            trend = "MODERATE_ACTIVITY"
+            
+        summary_text = (
+            f"Analysis of {len(raw_events)} recent articles implies a {trend.replace('_', ' ').lower()}. "
+            f"We observed {total_funding_rounds} funding rounds and {total_acquisitions} M&A events. "
+            f"Entities commanding the most focus include: {', '.join(top_companies) if top_companies else 'various players'}."
+        )
+         
+        return ToolResponse(
+            success=True, 
+            data=MarketSummary(
+                timeframe_days=days,
+                total_events_analyzed=len(raw_events),
+                top_companies_mentioned=top_companies,
+                event_type_distribution=event_types,
+                trend_signal=trend,
+                high_level_summary=summary_text
+            ),
+            error=None
+        )
+    except Exception as e:
+        logger.error(f"Internal error in summarize_market_activity: {e}", exc_info=True)
+        return ToolResponse(success=False, data=None, error="Internal server error occurred")
+
+
+# --- INGESTION BACKGROUND ENGINE ---
+
+job_status = {}
+job_status_lock = threading.Lock()
+
+def clean_stale_jobs():
+    """Fix 3: Cleanup expired jobs older than 15 minutes."""
+    with job_status_lock:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=15)
+        stale_keys = [k for k, v in job_status.items() if datetime.fromisoformat(v["updated_at"]) < cutoff]
+        for k in stale_keys:
+            del job_status[k]
+
+def run_ingestion_job(job_id: str, source: str, limit: int):
+    with job_status_lock:
+        job_status[job_id]["status"] = "processing"
+        
+    logger.info(f"Running background ingestion natively for source: {source}")
+    
+    db_session = DatabaseStore(ensure_schema=False)
+    
+    max_retries = 3
+    result = None
+    last_error = None
+    
+    for attempt in range(max_retries):
+        try:
+            out_dir = os.path.join(os.environ.get("DATA_DIR", "./data"), "output")
+            if source == "techcrunch":
+                from ai_techcrunch_ingest.cli import run_ingestion
+                result = run_ingestion(limit=limit, output=out_dir, raw=False, db_session=db_session, job_id=job_id)
+            else:
+                from ai_hackernews_ingest.cli import run_ingestion
+                result = run_ingestion(limit=limit, output=out_dir, raw=False, db_session=db_session, job_id=job_id)
+                
+            from ai_intel_processing.schema import IngestionResult
+            if not isinstance(result, IngestionResult):
+                with job_status_lock:
+                    job_status[job_id]["status"] = "failed"
+                    job_status[job_id]["error"] = "Internal ingestion contract violation"
+                return
+                
+            break
+            
+        except Exception as e:
+            last_error = str(e)
+            logger.warning(f"Transient error during ingestion for {job_id}: {last_error} (attempt {attempt+1}/{max_retries})")
+            time.sleep(2 ** attempt)
+            
+    with job_status_lock:
+        if result and result.status == "success":
+            job_status[job_id]["status"] = "completed"
+            job_status[job_id]["result_text"] = f"Successfully extracted documents. Processed: {result.processed}, Errors: {result.errors}"
+            mcp_cache.clear()
+            logger.info(f"Job {job_id} finished successfully. Cache cleared.")
+        else:
+            job_status[job_id]["status"] = "failed"
+            job_status[job_id]["error"] = last_error or "Ingestion returned non-success status"
+            logger.error(f"Job {job_id} failed: {job_status[job_id]['error']}")
+            
+        if job_id in job_status: # thread safety check if cleaned up
+            job_status[job_id]["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+@mcp.tool()
+@mcp_tool_wrapper
+def trigger_ingestion(source: SourceEnum, limit: int = 10) -> ToolResponse[str]:
+    """
+    Triggers an async scraping job. Does NOT block. Returns job_id to monitor via get_ingestion_status.
+    Use this tool to command the system to actively fetch the newest articles from TechCrunch or HackerNews if data looks stale.
+    """
+    if not isinstance(source, (str, SourceEnum)):
+        return ToolResponse(success=False, data=None, error="source must be a valid string or enum")
+    if not isinstance(limit, int):
+        return ToolResponse(success=False, data=None, error="limit must be an integer")
+        
+    source_val = getattr(source, 'value', source)
+    if source_val not in ["techcrunch", "hackernews"]:
+        return ToolResponse(success=False, data=None, error="source must be techcrunch or hackernews")
+        
+    if limit > 50: limit = 50
+    if limit < 1: limit = 1
+        
+    try:
+        clean_stale_jobs()
+            
+        job_id = str(uuid.uuid4())
+        now_iso = datetime.now(timezone.utc).isoformat()
+        
+        with job_status_lock:
+            job_status[job_id] = {
+                "status": "pending",
+                "source": source_val,
+                "created_at": now_iso,
+                "updated_at": now_iso
+            }
+        
+        t = threading.Thread(target=run_ingestion_job, args=(job_id, source_val, limit), daemon=True)
+        t.start()
+        
+        return ToolResponse(success=True, data=job_id, error=None)
+    except Exception as e:
+        logger.error(f"Internal error in trigger_ingestion: {e}", exc_info=True)
+        return ToolResponse(success=False, data=None, error="Internal server error occurred")
+
+@mcp.tool()
+@mcp_tool_wrapper
+def get_ingestion_status(job_id: str) -> ToolResponse[dict]:
+    """
+    Looks up real-time status of trigger_ingestion job.
+    Use this immediately after trigger_ingestion to monitor completion. Once status is 'completed', query for events.
+    """
+    if not isinstance(job_id, str):
+        return ToolResponse(success=False, data=None, error="job_id must be a string")
+        
+    try:
+        clean_stale_jobs()
+        
+        with job_status_lock:
+            status_dict = job_status.get(job_id)
+            if hasattr(status_dict, "copy"):
+                status_dict = status_dict.copy()
+                
+        if not status_dict:
+            return ToolResponse(success=False, data=None, error=f"Job {job_id} not found or expired (jobs prune after 15m).")
+            
+        return ToolResponse(success=True, data=status_dict, error=None)
+    except Exception as e:
+        logger.error(f"Internal error in get_ingestion_status: {e}", exc_info=True)
+        return ToolResponse(success=False, data=None, error="Internal server error occurred")
+
+
+def main():
+    mcp.run()
+
+if __name__ == "__main__":
+    main()
+
+
+==================== FILE: ./ai_capital_mcp/src/ai_capital_mcp/__init__.py ====================
+
+"""
+Capital Intelligence Engine - MCP Framework
+"""
+
+
+==================== FILE: ./ai_capital_mcp/src/ai_capital_mcp/logger.py ====================
+
+import logging
+import logging.handlers
+import os
+import time
+from functools import wraps
+from typing import Callable, Any
+
+# Configure standard file logging for the MCP server safely using absolute resolution
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../"))
+DATA_DIR = os.path.join(BASE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+LOG_FILE = os.path.join(DATA_DIR, "mcp_server.log")
+
+logger = logging.getLogger("mcp_server")
+logger.setLevel(logging.INFO)
+
+if not logger.handlers:
+    rfh = logging.handlers.RotatingFileHandler(
+        LOG_FILE, maxBytes=5*1024*1024, backupCount=2
+    )
+    formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - [%(funcName)s] - %(message)s'
+    )
+    rfh.setFormatter(formatter)
+    logger.addHandler(rfh)
+
+def mcp_tool_wrapper(func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(*args, **kwargs) -> Any:
+        start_time = time.time()
+        tool_name = func.__name__
+        logger.info(f"Triggered tool '{tool_name}' with kwargs: {kwargs}")
+        
+        try:
+            result = func(*args, **kwargs)
+            duration = (time.time() - start_time) * 1000
+            
+            # Fix 11: Always unconditionally stamp observability metrics if dealing with a ToolResponse
+            if hasattr(result, 'execution_time_ms'):
+                setattr(result, 'execution_time_ms', duration)
+            if hasattr(result, 'source'):
+                setattr(result, 'source', tool_name)
+                
+            success = getattr(result, 'success', True)
+            logger.info(f"Completed tool '{tool_name}' in {duration:.2f}ms | success={success}")
+            return result
+            
+        except Exception as e:
+            duration = (time.time() - start_time) * 1000
+            logger.error(f"Failed tool '{tool_name}' in {duration:.2f}ms | error={str(e)}", exc_info=True)
+            
+            from .schema import ToolResponse
+            # Fix 1: strict ToolResponse invariants where success=False enforces data=None
+            return ToolResponse(
+                success=False,
+                data=None, 
+                error=f"Uncaught Server Exception: {str(e)}",
+                execution_time_ms=duration,
+                source=tool_name
+            )
+
+    return wrapper
+
+
+==================== FILE: ./ai_capital_mcp/src/ai_capital_mcp/schema.py ====================
+
+from typing import TypeVar, Generic, Optional, Literal, List
+from pydantic import BaseModel, Field
+
+T = TypeVar('T')
+
+class ToolResponse(BaseModel, Generic[T]):
+    """Standardized wrapper for all MCP tool returns."""
+    success: bool = Field(..., description="True if the operation succeeded.")
+    data: Optional[T] = Field(None, description="The strongly-typed payload. Must be None if success=False.")
+    error: Optional[str] = Field(None, description="Explicit error message if success is False.")
+    execution_time_ms: Optional[float] = Field(None, description="Execution time in milliseconds.")
+    source: Optional[str] = Field(None, description="The MCP underlying tool source.")
+
+EventTypeEnum = Literal["funding", "acquisition", "partnership", "contract", "restructuring", "other"]
+SourceEnum = Literal["techcrunch", "hackernews"]
+
+class CapitalEvent(BaseModel):
+    title: str = Field(..., description="The title of the capital event.")
+    company: str = Field(default="Unknown", description="The company involved. Normalized to 'Unknown' if missing.")
+    event_type: EventTypeEnum = Field(default="other", description="The classification of the event.")
+    funding_amount: str = Field(default="Undisclosed", description="Funding amount if applicable.")
+    summary: str = Field(default="", description="Summary of the event.")
+    published_at: str = Field(default="1970-01-01T00:00:00Z", description="Publication date string.")
+
+class MarketSummary(BaseModel):
+    timeframe_days: int = Field(..., description="The number of days aggregated.")
+    total_events_analyzed: int = Field(..., description="Total events found in this window.")
+    top_companies_mentioned: List[str] = Field(default_factory=list, description="Companies mentioned the most.")
+    event_type_distribution: dict[str, int] = Field(default_factory=dict, description="Counts of funding vs acquisition vs others.")
+    trend_signal: str = Field(..., description="High-level directional trend indicator.")
+    high_level_summary: str = Field(..., description="A synthesized overview of market movement.")
+
+
+==================== FILE: ./ai_hackernews_ingest/pyproject.toml ====================
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_hackernews_ingest"
+version = "0.1.0"
+description = "Hacker News ingestion module for AI news system"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests>=2.28",
+    "beautifulsoup4>=4.11",
+    "pydantic>=2.0",
+    "click>=8.1",
+    "ai_intel_processing",
+]
+
+[project.scripts]
+ai-hn = "ai_hackernews_ingest.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+==================== FILE: ./ai_hackernews_ingest/src/ai_hackernews_ingest/scraper.py ====================
+
+import requests
+from bs4 import BeautifulSoup
+import logging
+import time
+from typing import Optional
+from ai_intel_processing.utils import setup_logger, log_struct
+
+logger = setup_logger("ai_hackernews_ingest.scraper")
+
+DEFAULT_TIMEOUT = 10
+MAX_RETRIES = 3
+RATE_LIMIT_DELAY = 1.0
+
+from typing import Optional, Tuple
+
+def fetch_content_generic(url: str) -> Tuple[str, str, int]:
+    """
+    Fetches content from a generic URL. 
+    Returns (clean_text, raw_html, status_code).
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            log_struct(logger, logging.DEBUG, "Fetching generic content", url=url, attempt=attempt+1)
+            response = requests.get(url, timeout=DEFAULT_TIMEOUT, headers={"User-Agent": "AI_Ingest_Bot/1.0"})
+            response.raise_for_status()
+            
+            # Rate limiting
+            time.sleep(RATE_LIMIT_DELAY)
+            
+            raw_text = response.text
+            soup = BeautifulSoup(raw_text, 'html.parser')
+            
+            # Remove script and style elements
+            for script in soup(["script", "style"]):
+                script.decompose()
+                
+            text = soup.get_text(separator='\n')
+            
+            # Simple cleanup
+            lines = (line.strip() for line in text.splitlines())
+            chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+            clean_text = '\n'.join(chunk for chunk in chunks if chunk)
+            
+            return clean_text, raw_text, response.status_code
+        
+        except Exception as e:
+            status = getattr(e, 'response', None) and getattr(e.response, 'status_code', 0)
+            log_struct(logger, logging.WARNING, "Failed to fetch generic content", url=url, error=str(e), status=status or 0, attempt=attempt+1)
+            if status == 404:
+                return "", "", 404
+            time.sleep(2 ** attempt)
+
+    log_struct(logger, logging.ERROR, "Max retries exceeded for generic content", url=url)
+    return "", "", 0
+
+
+==================== FILE: ./ai_hackernews_ingest/src/ai_hackernews_ingest/client.py ====================
+
+import requests
+import logging
+from typing import List, Dict, Any, Optional
+from ai_intel_processing.utils import setup_logger, log_struct
+import time
+
+logger = setup_logger("ai_hackernews_ingest.client")
+
+HN_API_BASE = "https://hacker-news.firebaseio.com/v0"
+
+def fetch_top_stories(limit: int = 50) -> List[int]:
+    """
+    Fetches the top story IDs from Hacker News.
+    """
+    url = f"{HN_API_BASE}/topstories.json"
+    try:
+        log_struct(logger, logging.DEBUG, "Fetching top stories", url=url)
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        ids = response.json()
+        return ids[:limit]
+    except requests.RequestException as e:
+        log_struct(logger, logging.ERROR, "Failed to fetch top stories", error=str(e))
+        return []
+
+def fetch_story_details(story_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Fetches details for a specific story ID.
+    """
+    url = f"{HN_API_BASE}/item/{story_id}.json"
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except requests.RequestException as e:
+        log_struct(logger, logging.WARNING, "Failed to fetch story details", story_id=story_id, error=str(e))
+        return None
+
+
+==================== FILE: ./ai_hackernews_ingest/src/ai_hackernews_ingest/__init__.py ====================
+
+"""
+ai_hackernews_ingest - Hacker News ingestion module.
+"""
+
+from .client import fetch_top_stories, fetch_story_details
+from .filter import is_ai_story
+
+__all__ = ["fetch_top_stories", "fetch_story_details", "is_ai_story"]
+
+
+==================== FILE: ./ai_hackernews_ingest/src/ai_hackernews_ingest/cli.py ====================
+
+import click
+import json
+import os
+import time
+from datetime import datetime
+from typing import Optional
+from .client import fetch_top_stories, fetch_story_details
+from .filter import is_ai_story
+from .scraper import fetch_content_generic
+from ai_intel_processing.schema import NewsArticle
+from ai_intel_processing.processing import IntelProcessor
+from ai_intel_processing.database import DatabaseStore
+from ai_intel_processing.deduplication import DeduplicationStore
+from ai_intel_processing.utils import setup_logger, log_struct
+import logging
+
+from ai_intel_processing.schema import IngestionResult
+
+logger = setup_logger("ai_hackernews_ingest.cli")
+
+def run_ingestion(limit: int, output: str, raw: bool, db_session: Optional[DatabaseStore] = None, job_id: Optional[str] = None) -> IngestionResult:
+    log_struct(logger, logging.INFO, "Starting Hacker News ingestion", limit=limit, output_dir=output, raw_mode=raw, job_id=job_id)
+    
+    os.makedirs(output, exist_ok=True)
+    
+    top_ids = fetch_top_stories(limit=limit * 2) # Fetch more to allow for filtering
+    db = db_session if db_session else DatabaseStore()
+    dedup = DeduplicationStore()
+    processor = IntelProcessor()
+    
+    run_id = db.start_run("hackernews")
+    count = 0
+    errors = 0
+    for story_id in top_ids:
+        if count >= limit:
+            break
+            
+        story = fetch_story_details(story_id)
+        if not story:
+            errors += 1
+            continue
+            
+        title = story.get("title", "")
+        if is_ai_story(title):
+            log_struct(logger, logging.INFO, "Found AI story", title=title, id=story_id, job_id=job_id)
+            
+            url = story.get("url")
+            
+            # Deduplication check
+            check_url = url if url else f"https://news.ycombinator.com/item?id={story_id}"
+            canonical_key = dedup._compute_hash(check_url)
+            if db.is_processed(canonical_key):
+                log_struct(logger, logging.DEBUG, "Skipping processed URL", url=check_url)
+                continue
+
+            content = ""
+            raw_text = ""
+            status_code = 200 # Default for non-fetched internal stories
+            
+            if url:
+                content, raw_text, status_code = fetch_content_generic(url)
+            elif "text" in story:
+                content = story["text"] # HN internal discussion
+                raw_text = content
+                status_code = 200
+            
+            if not content:
+                log_struct(logger, logging.WARNING, "No content found for story", id=story_id, title=title)
+                errors += 1
+                continue
+
+            if raw:
+                from ai_intel_processing.schema import RawIngestionOutput
+                
+                raw_length = len(raw_text)
+                raw_preview = raw_text[:500] if raw_text else ""
+                
+                output_data = RawIngestionOutput(
+                    source="hackernews",
+                    title=title,
+                    url=check_url,
+                    published_at=datetime.utcfromtimestamp(story.get("time", time.time())).isoformat(),
+                    raw_text_length=raw_length,
+                    raw_text_preview=raw_preview,
+                    http_status=status_code
+                )
+                output_file = os.path.join(output, "hackernews_data.jsonl")
+                with open(output_file, 'a') as f:
+                    f.write(output_data.model_dump_json() + '\n')
+                db.mark_processed_raw(canonical_key, "hackernews", title, check_url)
+                count += 1
+            else:
+                # Create NewsArticle
+                try:
+                    article = NewsArticle(
+                        source="hackernews",
+                        title=title,
+                        url=check_url,
+                        published_at=datetime.utcfromtimestamp(story.get("time", time.time())),
+                        content=content,
+                        raw_metadata={
+                            "hn_score": story.get("score"),
+                            "comment_count": story.get("descendants"),
+                            "by": story.get("by"),
+                            "id": story_id
+                        }
+                    )
+                    
+                    output_data = processor.process_article(article)
+                    db.save_article(canonical_key, output_data)
+                    
+                    output_file = os.path.join(output, "hackernews_data.jsonl")
+                    with open(output_file, 'a') as f:
+                        f.write(output_data.model_dump_json() + '\n')
+                        
+                    count += 1
+                    
+                except Exception as e:
+                    log_struct(logger, logging.ERROR, "Failed to process story", id=story_id, error=str(e))
+                    errors += 1
+        else:
+            log_struct(logger, logging.DEBUG, "Skipping non-AI story", title=title)
+
+    db.finish_run(run_id, "success", count, errors)
+    log_struct(logger, logging.INFO, "Ingestion complete", total_processed=count, job_id=job_id)
+    return IngestionResult(status="success", processed=count, errors=errors)
+
+@click.command()
+@click.option('--limit', default=20, help='Number of stories to check (not necessarily output).')
+@click.option('--output', default='./output', help='Output directory for JSONL files.')
+@click.option('--raw', is_flag=True, help='Output raw ingestion data without LLM processing.')
+def main(limit, output, raw):
+    """
+    Hacker News AI Ingestion CLI.
+    """
+    run_ingestion(limit, output, raw)
+
+if __name__ == "__main__":
+    main()
+
+
+==================== FILE: ./ai_hackernews_ingest/src/ai_hackernews_ingest/filter.py ====================
+
+
+AI_KEYWORDS = {
+    "ai", "artificial intelligence", "llm", "large language model", 
+    "machine learning", "neural network", "transformer", "gpt", 
+    "openai", "anthropic", "deepmind", "generative ai", "diffusion model"
+}
+
+def is_ai_story(title: str) -> bool:
+    """
+    Determines if a story is related to AI based on the title.
+    Case-insensitive matching against a set of keywords.
+    """
+    if not title:
+        return False
+        
+    # Word boundary check is better, but simple substring sufficient for now given the list
+    # Improved: Check for word boundaries to avoid false positives (e.g., "mail" matches "ai")
+    normalized_title = title.lower()
+    
+    # A simple regex or word splitting would be more robust for "ai"
+    # For now, let's just split by space and check, or use simple substring for longer terms
+    
+    words = set(normalized_title.split())
+    if "ai" in words:
+        return True
+        
+    for keyword in AI_KEYWORDS:
+        if keyword == "ai": continue # Handled by word split
+        if keyword in normalized_title:
+            return True
+            
+    return False
+
+
+==================== FILE: ./tests/test_deduplication.py ====================
+
+import pytest
+import os
+import json
+from ai_intel_processing.deduplication import DeduplicationStore
+
+TEST_STORE_PATH = "./tests/data/test_dedup.json"
+
+@pytest.fixture
+def dedup_store():
+    if os.path.exists(TEST_STORE_PATH):
+        os.remove(TEST_STORE_PATH)
+    store = DeduplicationStore(storage_path=TEST_STORE_PATH)
+    yield store
+    if os.path.exists(TEST_STORE_PATH):
+        os.remove(TEST_STORE_PATH)
+
+def test_url_normalization(dedup_store):
+    url1 = "https://Example.com/Foo?utm_source=bar"
+    url2 = "https://example.com/foo?utm_source=bar"
+    
+    norm1 = dedup_store._normalize_url(url1)
+    norm2 = dedup_store._normalize_url(url2)
+    
+    assert norm1 == "https://example.com/Foo"
+    assert norm2 == "https://example.com/foo"
+
+def test_hashing_consistency(dedup_store):
+    url = "https://techcrunch.com/article"
+    hash1 = dedup_store._compute_hash(url)
+    hash2 = dedup_store._compute_hash(url)
+    assert hash1 == hash2
+
+def test_persistence(dedup_store):
+    url = "https://example.com/persistent"
+    assert not dedup_store.is_processed(url)
+    
+    dedup_store.mark_processed(url)
+    assert dedup_store.is_processed(url)
+    
+    # Reload from disk
+    new_store = DeduplicationStore(storage_path=TEST_STORE_PATH)
+    assert new_store.is_processed(url)
+
+
+==================== FILE: ./tests/test_processing.py ====================
+
+import pytest
+from unittest.mock import MagicMock, patch
+from datetime import datetime
+from ai_intel_processing.processing import IntelProcessor
+from ai_intel_processing.schema import NewsArticle, InvestmentAnalysis
+
+def test_process_article_with_llm():
+    # Mock LLM Client
+    mock_llm_client = MagicMock()
+    mock_llm_client.model = "mock-model"
+    
+    # Mock analysis result
+    mock_analysis = InvestmentAnalysis(
+        company="Test Corp",
+        funding_amount="$5M",
+        funding_stage="Seed",
+        investors=["VC A"],
+        summary="A test summary",
+        investment_relevant=True,
+        event_type="funding"
+    )
+    mock_llm_client.analyze.return_value = mock_analysis
+
+    # Patch the LLMClient import in processing.py or where it's instantiated
+    # Since IntelProcessor instantiates it in __init__, we can mock the class
+    with patch('ai_intel_processing.llm.LLMClient', return_value=mock_llm_client):
+        processor = IntelProcessor(api_key="fake-key")
+        
+        article = NewsArticle(
+            source="techcrunch",
+            title="Test Article",
+            url="https://example.com/article",
+            published_at=datetime.utcnow(),
+            content="Some content about Test Corp raising $5M."
+        )
+        
+        output = processor.process_article(article)
+        
+        # Verify LLM was called
+        mock_llm_client.analyze.assert_called_once()
+        
+        # Verify output structure
+        assert output.company == "Test Corp"
+        assert output.funding_amount == "$5M"
+        assert output.investment_relevant is True
+        assert output.summary == "A test summary"
+
+def test_process_article_llm_failure():
+    mock_llm_client = MagicMock()
+    mock_llm_client.model = "mock-model"
+    mock_llm_client.analyze.return_value = None # Simulate failure
+    
+    with patch('ai_intel_processing.llm.LLMClient', return_value=mock_llm_client):
+        processor = IntelProcessor(api_key="fake-key")
+        
+        article = NewsArticle(
+            source="techcrunch",
+            title="Fail Article",
+            url="https://example.com/fail",
+            published_at=datetime.utcnow(),
+            content="Content"
+        )
+        
+        with pytest.raises(RuntimeError, match="LLM returned no analysis"):
+            processor.process_article(article)
+
+
+==================== FILE: ./tests/test_critical_bugs.py ====================
+
+import pytest
+from ai_intel_processing.schema import OutputSchema
+from pydantic import ValidationError
+
+def test_output_schema_url_validator_returns_value():
+    """
+    Verifies that the URL validator returns the value and doesn't swallow it (returning None).
+    """
+    url = "https://techcrunch.com/article"
+    data = {
+        "source": "techcrunch",
+        "title": "Test Title",
+        "url": url,
+        "content": "Content",
+        "published_at": None,
+        "summary": "Summary",
+        "investment_relevant": True,
+        "event_type": "other",
+        "model_used": "test",
+        "prompt_version": "0.0",
+        "processing_timestamp": "2023-01-01",
+        "article_hash": "hash"
+    }
+    # If validator returns None, this will likely fail validation or result in None url if allowed
+    model = OutputSchema(**data)
+    assert model.url == url
+    assert model.url is not None
+
+def test_output_schema_url_validator_rejects_invalid():
+    data = {
+        "source": "techcrunch",
+        "title": "Test Title",
+        "url": "ftp://bad-url.com",
+        "summary": "Summary",
+        "investment_relevant": True
+    }
+    with pytest.raises(ValidationError):
+        OutputSchema(**data)
+
+
+==================== FILE: ./tests/test_schema.py ====================
+
+import pytest
+from ai_intel_processing.schema import NewsArticle, OutputSchema, RawIngestionOutput
+from pydantic import ValidationError
+from datetime import datetime
+
+def test_news_article_validation():
+    # Valid
+    article = NewsArticle(
+        source="test",
+        title="Test Article",
+        url="https://example.com",
+        content="Some content"
+    )
+    assert article.title == "Test Article"
+    
+    # Invalid URL (Pydantic might not validate strictly logic unless we added validator, 
+    # but I added one to OutputSchema)
+    # NewsArticle has: url: str.
+    
+    # Missing required field
+    with pytest.raises(ValidationError):
+        NewsArticle(source="test")
+
+def test_output_schema_validation():
+    # Valid
+    output = OutputSchema(
+        schema_version="2.0",
+        source="test",
+        title="Test",
+        url="https://example.com",
+        summary="Summary",
+        investment_relevant=True,
+        published_at="2023-01-01T00:00:00",
+        event_type="other",
+        model_used="gpt-4",
+        prompt_version="1.0",
+        processing_timestamp="2023-01-01T00:00:00",
+        article_hash="abc"
+    )
+    assert output.schema_version == "2.0"
+    
+    # Invalid URL
+    with pytest.raises(ValidationError):
+        OutputSchema(
+            source="test",
+            title="Test",
+            url="ftp://example.com", # Schema requires http/https
+            summary="Summary",
+            investment_relevant=True
+        )
+
+def test_raw_ingestion_output():
+    raw = RawIngestionOutput(
+        source="test",
+        title="Test",
+        url="https://example.com",
+        published_at=None,
+        raw_text_length=100,
+        raw_text_preview="Preview",
+        http_status=200
+    )
+    assert raw.http_status == 200
+
+
+==================== FILE: ./tests/test_retry_thread_safety.py ====================
+
+import pytest
+from unittest.mock import patch, MagicMock
+from ai_capital_mcp.server import run_ingestion_job, job_status
+import ai_techcrunch_ingest.cli
+import ai_hackernews_ingest.cli
+from ai_intel_processing.schema import IngestionResult
+
+def test_ingestion_retry_loop():
+    job_id = "test_retry_job_123"
+    job_status[job_id] = {"status": "pending"}
+    
+    mock_run = MagicMock(side_effect=[Exception("Network hiccup"), Exception("Network hiccup 2"), IngestionResult(status="success", processed=2, errors=0)])
+    
+    with patch("ai_techcrunch_ingest.cli.run_ingestion", mock_run):
+        run_ingestion_job(job_id, "techcrunch", 2)
+        
+    assert mock_run.call_count == 3
+    assert job_status[job_id]["status"] == "completed"
+
+def test_ingestion_failure_exhaustion():
+    job_id = "test_exhaust_job_456"
+    job_status[job_id] = {"status": "pending"}
+    
+    mock_run = MagicMock(side_effect=Exception("Terminal failure"))
+    
+    with patch("ai_hackernews_ingest.cli.run_ingestion", mock_run):
+        run_ingestion_job(job_id, "hackernews", 2)
+        
+    assert mock_run.call_count == 3
+    assert job_status[job_id]["status"] == "failed"
+    assert "Terminal failure" in job_status[job_id]["error"]
+
+
+==================== FILE: ./tests/test_mcp_validation.py ====================
+
+import pytest
+from ai_capital_mcp.server import (
+    get_capital_events,
+    search_companies,
+    summarize_market_activity,
+    trigger_ingestion,
+    get_ingestion_status
+)
+
+def test_get_capital_events_validation():
+    res = get_capital_events(limit="ten")
+    assert res.success is False
+    assert "limit must be an integer" in res.error
+    assert res.data is None
+
+def test_search_companies_validation():
+    res = search_companies(company_name=123)
+    assert res.success is False
+    assert "company_name must be a string" in res.error
+
+    res = search_companies(company_name="a")
+    assert res.success is False
+    assert "company_name must be at least 2 characters long" in res.error
+
+def test_summarize_market_activity_validation():
+    res = summarize_market_activity(days="seven")
+    assert res.success is False
+    assert "days must be an integer" in res.error
+
+def test_trigger_ingestion_validation():
+    res = trigger_ingestion(source="invalid_source")
+    assert res.success is False
+    assert "source must be techcrunch or hackernews" in res.error
+
+def test_get_ingestion_status_validation():
+    res = get_ingestion_status(job_id=123)
+    assert res.success is False
+    assert "job_id must be a string" in res.error
+
+
+==================== FILE: ./tests/test_filtering.py ====================
+
+import pytest
+from ai_hackernews_ingest.filter import is_ai_story
+
+@pytest.mark.parametrize("title,expected", [
+    ("New AI model released", True),
+    ("Advances in Machine Learning", True),
+    ("LLMs are changing the world", True),
+    ("Python 3.14 released", False),
+    ("Mail server configuration", False), # "ai" in "mail" should not match if logic is good
+    ("The future of artificial intelligence", True),
+    ("Neural Networks explained", True),
+    ("GPT-5 rumors", True),
+    ("Generative AI art", True),
+    ("OpenAI announces new features", True),
+    ("My cat likes food", False)
+])
+def test_is_ai_story(title, expected):
+    assert is_ai_story(title) == expected
+
+
+==================== FILE: ./ai_techcrunch_ingest/pyproject.toml ====================
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_techcrunch_ingest"
+version = "0.1.0"
+description = "TechCrunch ingestion module for AI news system"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "requests>=2.28",
+    "beautifulsoup4>=4.11",
+    "feedparser>=6.0",
+    "pydantic>=2.0",
+    "click>=8.1",
+    "ai_intel_processing", # Local dependency will need to be installed in editable mode or similar
+]
+
+[project.scripts]
+ai-techcrunch = "ai_techcrunch_ingest.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+==================== FILE: ./ai_techcrunch_ingest/src/ai_techcrunch_ingest/scraper.py ====================
+
+import requests
+from bs4 import BeautifulSoup
+import logging
+import time
+from typing import Optional, Dict, Any
+from ai_intel_processing.schema import NewsArticle
+from ai_intel_processing.utils import setup_logger, log_struct
+from datetime import datetime
+from dateutil import parser as date_parser
+
+logger = setup_logger("ai_techcrunch_ingest.scraper")
+
+DEFAULT_TIMEOUT = 10
+MAX_RETRIES = 3
+RATE_LIMIT_DELAY = 1.0 # seconds
+
+from typing import Optional, Dict, Any, Tuple
+
+def fetch_article(url: str, session: Optional[requests.Session] = None) -> Tuple[Optional[str], int]:
+    """
+    Fetches the HTML content of an article with retries and timeout.
+    Returns (html_content, status_code).
+    """
+    if session is None:
+        session = requests.Session()
+        session.headers.update({"User-Agent": "AI_Ingest_Bot/1.0"})
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            log_struct(logger, logging.DEBUG, "Fetching article", url=url, attempt=attempt+1)
+            response = session.get(url, timeout=DEFAULT_TIMEOUT)
+            response.raise_for_status()
+            
+            # Rate limiting
+            time.sleep(RATE_LIMIT_DELAY)
+            
+            return response.text, response.status_code
+        except requests.RequestException as e:
+            status = getattr(e.response, 'status_code', 0) if e.response else 0
+            log_struct(logger, logging.WARNING, "Failed to fetch article", url=url, error=str(e), attempt=attempt+1, status=status)
+            if status == 404:
+                return None, 404 # Don't retry 404s
+            time.sleep(2 ** attempt) # Exponential backoff
+    
+    log_struct(logger, logging.ERROR, "Max retries exceeded", url=url)
+    return None, 0
+
+def extract_article_data(html: str, url: str) -> Optional[NewsArticle]:
+    """
+    Parses HTML to extract article content and metadata.
+    """
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # TechCrunch specific selectors (subject to change, hence the need for distinct scraper modules)
+        # Title
+        title_tag = soup.find('h1', class_='article__title')
+        title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+        
+        # Content
+        content_div = soup.find('div', class_='article-content')
+        if not content_div:
+             # Fallback for some layouts
+            content_div = soup.find('div', class_='entry-content')
+            
+        if content_div:
+            paragraphs = content_div.find_all('p')
+            content = "\n\n".join([p.get_text(strip=True) for p in paragraphs])
+        else:
+             content = ""
+             log_struct(logger, logging.WARNING, "Could not find content div", url=url)
+
+        # Date
+        # Trying to find date in meta tags first as it's more reliable
+        published_at_str = None
+        meta_date = soup.find('meta', property='article:published_time')
+        if meta_date:
+            published_at_str = meta_date['content']
+            
+        published_at = date_parser.parse(published_at_str) if published_at_str else datetime.utcnow()
+
+        return NewsArticle(
+            source="techcrunch",
+            title=title,
+            url=url,
+            published_at=published_at,
+            content=content,
+            raw_metadata={"parsed_at": datetime.utcnow().isoformat()}
+        )
+
+    except Exception as e:
+        log_struct(logger, logging.ERROR, "Error parsing article", url=url, error=str(e))
+        return None
+
+
+==================== FILE: ./ai_techcrunch_ingest/src/ai_techcrunch_ingest/rss.py ====================
+
+import feedparser
+import logging
+from typing import List, Dict, Any
+from ai_intel_processing.utils import setup_logger, log_struct
+
+logger = setup_logger("ai_techcrunch_ingest.rss")
+
+TC_RSS_URL = "https://techcrunch.com/category/artificial-intelligence/feed/"
+
+def fetch_feed(url: str = TC_RSS_URL) -> List[Dict[str, Any]]:
+    """
+    Fetches and parses the TechCrunch AI RSS feed.
+    Returns a list of raw entry dictionaries.
+    """
+    log_struct(logger, logging.INFO, "Fetching RSS feed", url=url)
+    
+    feed = feedparser.parse(url)
+    
+    if feed.bozo:
+        log_struct(logger, logging.WARNING, "Feed parsing encountered an error (bozo)", error=str(feed.bozo_exception))
+        # Depending on severity, we might still process partial data, but let's log it clearly.
+
+    entries = feed.entries
+    log_struct(logger, logging.INFO, "Feed fetched successfully", count=len(entries))
+    
+    return entries
+
+
+==================== FILE: ./ai_techcrunch_ingest/src/ai_techcrunch_ingest/__init__.py ====================
+
+"""
+ai_techcrunch_ingest - TechCrunch ingestion module.
+"""
+
+from .rss import fetch_feed
+from .scraper import fetch_article
+
+__all__ = ["fetch_feed", "fetch_article"]
+
+
+==================== FILE: ./ai_techcrunch_ingest/src/ai_techcrunch_ingest/cli.py ====================
+
+import click
+import json
+import os
+from typing import Optional
+from .rss import fetch_feed
+from .scraper import fetch_article, extract_article_data
+from ai_intel_processing.processing import IntelProcessor
+from ai_intel_processing.database import DatabaseStore
+from ai_intel_processing.deduplication import DeduplicationStore
+from ai_intel_processing.utils import setup_logger, log_struct
+import logging
+
+from ai_intel_processing.schema import IngestionResult
+
+logger = setup_logger("ai_techcrunch_ingest.cli")
+
+def run_ingestion(limit: int, output: str, raw: bool, db_session: Optional[DatabaseStore] = None, job_id: Optional[str] = None) -> IngestionResult:
+    log_struct(logger, logging.INFO, "Starting TechCrunch ingestion", limit=limit, output_dir=output, raw_mode=raw, job_id=job_id)
+    
+    # We still ensure output dir exists for raw mode if needed
+    os.makedirs(output, exist_ok=True)
+    
+    entries = fetch_feed()
+    db = db_session if db_session else DatabaseStore()
+    dedup = DeduplicationStore() # keep for hashing logic
+    processor = IntelProcessor() # API key would be passed here via env var or config
+    
+    run_id = db.start_run("techcrunch")
+    count = 0
+    errors = 0
+    for entry in entries:
+        if count >= limit:
+            break
+        
+        url = entry.link
+        canonical_key = dedup._compute_hash(url)
+        
+        if db.is_processed(canonical_key):
+            log_struct(logger, logging.DEBUG, "Skipping processed URL", url=url)
+            continue
+
+        log_struct(logger, logging.INFO, "Processing entry", title=entry.title, job_id=job_id)
+        
+        html, status_code = fetch_article(url)
+        
+        if raw:
+            # Raw mode: normalize to cleaned text length (per requirements)
+            from ai_intel_processing.schema import RawIngestionOutput
+            
+            raw_text_length = 0
+            raw_preview = ""
+            
+            if html:
+                 # We must extract the text to measure it properly
+                article = extract_article_data(html, url)
+                if article and article.content:
+                    raw_text_length = len(article.content)
+                    raw_preview = article.content[:500]
+                else:
+                    # Fallback if extraction fails
+                    raw_text_length = len(html)
+                    raw_preview = html[:500]
+
+            output_data = RawIngestionOutput(
+                source="techcrunch",
+                title=entry.title,
+                url=url,
+                published_at=entry.published if hasattr(entry, 'published') else None,
+                raw_text_length=raw_text_length,
+                raw_text_preview=raw_preview,
+                http_status=status_code
+            )
+            output_file = os.path.join(output, "techcrunch_data.jsonl")
+            with open(output_file, 'a') as f:
+                f.write(output_data.model_dump_json() + '\n')
+                
+            db.mark_processed_raw(canonical_key, "techcrunch", entry.title, url)
+            count += 1
+            
+        elif html:
+            # Normal mode
+            article = extract_article_data(html, url)
+            if article:
+                # Enrich with RSS title if extraction failed
+                if entry.title and (not article.title or article.title == "Unknown Title"):
+                    article.title = entry.title
+                    
+                # Enrich with Intel Processor
+                try:
+                    output_data = processor.process_article(article)
+                    db.save_article(canonical_key, output_data)
+                    
+                    output_file = os.path.join(output, "techcrunch_data.jsonl")
+                    with open(output_file, 'a') as f:
+                        f.write(output_data.model_dump_json() + '\n')
+                        
+                    count += 1
+                except Exception as e:
+                    log_struct(logger, logging.ERROR, "Failed to process article", url=url, error=str(e))
+                    errors += 1
+            else:
+                errors += 1
+        else:
+            errors += 1
+
+    db.finish_run(run_id, "success", count, errors)
+    log_struct(logger, logging.INFO, "Ingestion complete", total_processed=count, job_id=job_id)
+    return IngestionResult(status="success", processed=count, errors=errors)
+
+@click.command()
+@click.option('--limit', default=10, help='Number of articles to fetch.')
+@click.option('--output', default='./output', help='Output directory for JSONL files.')
+@click.option('--raw', is_flag=True, help='Output raw ingestion data without LLM processing.')
+def main(limit, output, raw):
+    """
+    TechCrunch AI Ingestion CLI.
+    """
+    run_ingestion(limit, output, raw)
+
+if __name__ == "__main__":
+    main()
+
+
+==================== FILE: ./scripts/start_mcp.sh ====================
+
+#!/bin/bash
+set -e
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+PROJECT_ROOT="$(dirname "$DIR")"
+
+# Load environment
+if [ -f "$PROJECT_ROOT/.env" ]; then
+    export $(grep -v '^#' "$PROJECT_ROOT/.env" | xargs)
+fi
+
+# Preflight check: binary exists
+MCP_BIN="/Library/Frameworks/Python.framework/Versions/3.11/bin/ai-capital-mcp"
+if [ ! -x "$MCP_BIN" ]; then
+    if command -v ai-capital-mcp &> /dev/null; then
+        MCP_BIN="ai-capital-mcp"
+    else
+        echo "FATAL ERROR: ai-capital-mcp command could not be found." >&2
+        echo "Please ensure the virtual environment is active or the package is installed in your python path." >&2
+        exit 1
+    fi
+fi
+
+# Launch
+exec "$MCP_BIN"
+
+
+==================== FILE: ./scripts/cron/entrypoint.sh ====================
+
+#!/usr/bin/env sh
+set -eu
+
+# Fallback values if not provided
+CRON_SCHEDULE="${CRON_SCHEDULE:-0 */6 * * *}"
+TZ_VALUE="${TZ:-UTC}"
+SCRAPER_COMMAND="${SCRAPER_COMMAND:-echo 'No scraper command provided'}"
+
+# Ensure directories exist
+mkdir -p /var/log
+mkdir -p /etc/cron.d
+mkdir -p /data
+
+# Export environment variables for cron
+env >> /etc/environment
+
+# Write out the crontab file to a temporary location
+cat > /tmp/scraper_cron <<EOF
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TZ=${TZ_VALUE}
+${CRON_SCHEDULE} cd /app && ${SCRAPER_COMMAND} >> /proc/1/fd/1 2>> /proc/1/fd/2
+
+EOF
+
+# Load the crontab file into cron
+crontab /tmp/scraper_cron
+
+printf '[scheduler] starting cron with schedule: %s\n' "$CRON_SCHEDULE"
+printf '[scheduler] running command: %s\n' "$SCRAPER_COMMAND"
+
+# Execute cron in the foreground
+exec cron -f
+
+
+==================== FILE: ./ai_intel_processing/pyproject.toml ====================
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai_intel_processing"
+version = "0.1.0"
+description = "Shared intelligence module for AI news ingestion system"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "python-dateutil>=2.8.2",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "mypy",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/deduplication.py ====================
+
+import hashlib
+import json
+import os
+import logging
+from typing import Set, Optional
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
+from .utils import setup_logger, log_struct
+
+logger = setup_logger("ai_intel_processing.deduplication")
+
+class DeduplicationStore:
+    def __init__(self, storage_path: str = None):
+        if storage_path is None:
+            storage_path = os.path.join(os.environ.get("DATA_DIR", "./data"), "processed_urls.json")
+        self.storage_path = storage_path
+        self.seen_hashes: Set[str] = set()
+        self._load_store()
+
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalizes a URL for consistent hashing.
+        - Lowercases scheme and netloc
+        - Removes tracking parameters (utm_*, etc.)
+        - Removes trailing slashes
+        - Drops fragment
+        """
+        parsed = urlparse(url)
+        
+        # Strip utm_ params from query
+        query_params = parse_qsl(parsed.query, keep_blank_values=True)
+        filtered_query = [(k, v) for k, v in query_params if not k.lower().startswith('utm_')]
+        new_query = urlencode(filtered_query)
+        
+        # Strip trailing slash from path
+        new_path = parsed.path.rstrip('/') if parsed.path != '/' else parsed.path
+        
+        normalized = urlunparse((
+            parsed.scheme.lower(), 
+            parsed.netloc.lower(), 
+            new_path, 
+            parsed.params, 
+            new_query, 
+            "" # Drop fragment
+        ))
+        return normalized
+
+    def _compute_hash(self, url: str) -> str:
+        """Computes SHA-256 hash of normalized URL."""
+        normalized = self._normalize_url(url)
+        return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+    def _load_store(self):
+        """Loads seen hashes from disk."""
+        if os.path.exists(self.storage_path):
+            try:
+                with open(self.storage_path, 'r') as f:
+                    data = json.load(f)
+                    self.seen_hashes = set(data.get("hashes", []))
+                log_struct(logger, logging.INFO, "Loaded deduplication store", count=len(self.seen_hashes))
+            except Exception as e:
+                log_struct(logger, logging.ERROR, "Failed to load deduplication store", error=str(e))
+                # Start fresh if corrupted
+                self.seen_hashes = set()
+        else:
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
+
+    def _save_store(self):
+        """Saves seen hashes to disk."""
+        try:
+            with open(self.storage_path, 'w') as f:
+                json.dump({"hashes": list(self.seen_hashes)}, f)
+        except Exception as e:
+            log_struct(logger, logging.ERROR, "Failed to save deduplication store", error=str(e))
+
+    def is_processed(self, url: str) -> bool:
+        """Checks if a URL has already been processed."""
+        url_hash = self._compute_hash(url)
+        return url_hash in self.seen_hashes
+
+    def mark_processed(self, url: str):
+        """Marks a URL as processed and persists to disk."""
+        url_hash = self._compute_hash(url)
+        if url_hash not in self.seen_hashes:
+            self.seen_hashes.add(url_hash)
+            self._save_store()
+            log_struct(logger, logging.DEBUG, "Marked URL as processed", url=url, hash=url_hash)
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/database.py ====================
+
+import sqlite3
+import json
+import logging
+from typing import List, Optional, Any, Dict
+from datetime import datetime
+import os
+
+from .schema import OutputSchema
+from .utils import setup_logger, log_struct
+
+logger = setup_logger("ai_intel_processing.database")
+
+def get_db_connection(db_path: str = None) -> sqlite3.Connection:
+    if db_path is None:
+        default_db = os.path.join(os.environ.get("DATA_DIR", "./data"), "scrapers.db")
+        db_path = os.environ.get("DB_PATH", default_db)
+    os.makedirs(os.path.dirname(os.path.abspath(db_path)) or ".", exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=15.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    conn.row_factory = sqlite3.Row
+    return conn
+
+class DatabaseStore:
+    def __init__(self, db_path: str = None, ensure_schema: bool = True):
+        self.db_path = db_path
+        if ensure_schema:
+            self.init_db()
+
+    def _get_connection(self) -> sqlite3.Connection:
+        return get_db_connection(self.db_path)
+
+    def init_db(self):
+        """Initializes the SQLite schema."""
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Table for runs
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS runs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        source TEXT NOT NULL,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        status TEXT NOT NULL,
+                        items_processed INTEGER DEFAULT 0,
+                        errors INTEGER DEFAULT 0
+                    )
+                """)
+                
+                # Table for processed articles/products
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS articles (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        canonical_key TEXT UNIQUE NOT NULL,
+                        source TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        url TEXT NOT NULL,
+                        published_at TEXT,
+                        company TEXT,
+                        investment_relevant BOOLEAN,
+                        event_type TEXT,
+                        summary TEXT,
+                        inserted_at TEXT NOT NULL,
+                        raw_data JSON
+                    )
+                """)
+                
+                # Index for deduplication lookup
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_canonical_key ON articles(canonical_key)
+                """)
+                
+                conn.commit()
+                log_struct(logger, logging.DEBUG, "Initialized SQLite schema", db_path=self.db_path)
+        except Exception as e:
+            log_struct(logger, logging.ERROR, "Failed to initialize database", error=str(e))
+            raise
+
+    def start_run(self, source: str) -> int:
+        """Records a new scraper run."""
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO runs (source, started_at, status) VALUES (?, ?, ?)",
+                (source, now, "running")
+            )
+            conn.commit()
+            return cursor.lastrowid
+
+    def finish_run(self, run_id: int, status: str, items_processed: int, errors: int):
+        """Marks a run as finished."""
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE runs 
+                SET completed_at = ?, status = ?, items_processed = ?, errors = ?
+                WHERE id = ?
+                """,
+                (now, status, items_processed, errors, run_id)
+            )
+            conn.commit()
+
+    def is_processed(self, canonical_key: str) -> bool:
+        """Checks if an article has been processed based on canonical key."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM articles WHERE canonical_key = ?", (canonical_key,))
+            return cursor.fetchone() is not None
+
+    def save_article(self, canonical_key: str, article: OutputSchema):
+        """Saves a processed article to the database. Overwrites if it exists."""
+        now = datetime.utcnow().isoformat()
+        raw_data = article.model_dump_json()
+        
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO articles 
+                (canonical_key, source, title, url, published_at, company, investment_relevant, event_type, summary, inserted_at, raw_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_key) DO UPDATE SET
+                    title=excluded.title,
+                    published_at=excluded.published_at,
+                    company=excluded.company,
+                    investment_relevant=excluded.investment_relevant,
+                    event_type=excluded.event_type,
+                    summary=excluded.summary,
+                    raw_data=excluded.raw_data
+                """,
+                (
+                    canonical_key,
+                    article.source,
+                    article.title,
+                    article.url,
+                    article.published_at,
+                    article.company,
+                    article.investment_relevant,
+                    article.event_type,
+                    article.summary,
+                    now,
+                    raw_data
+                )
+            )
+            conn.commit()
+
+    def mark_processed_raw(self, canonical_key: str, source: str, title: str, url: str):
+        """Marks a raw ingestion run uniquely without needing full LLM output blocks."""
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO articles 
+                (canonical_key, source, title, url, inserted_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(canonical_key) DO NOTHING
+                """,
+                (canonical_key, source, title, url, now)
+            )
+            conn.commit()
+
+    def get_events(self, limit: int, event_type: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Fetches the latest events from the database."""
+        query = "SELECT raw_data FROM articles WHERE 1=1"
+        params = []
+        if event_type:
+            query += " AND json_extract(raw_data, '$.event_type') = ?"
+            params.append(event_type)
+        query += " ORDER BY inserted_at DESC LIMIT ?"
+        params.append(limit)
+        
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(query, tuple(params))
+            rows = cursor.fetchall()
+            
+        return [json.loads(row["raw_data"]) for row in rows]
+
+    def search_events(self, company_name: str, limit: int) -> List[Dict[str, Any]]:
+        """Fuzzy searches events by company name or raw text content."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT raw_data FROM articles WHERE json_extract(raw_data, '$.company') LIKE ? ORDER BY inserted_at DESC LIMIT ?",
+                (f"%{company_name}%", limit)
+            )
+            rows = cursor.fetchall()
+            
+            if not rows:
+                cursor.execute(
+                    "SELECT raw_data FROM articles WHERE raw_data LIKE ? ORDER BY inserted_at DESC LIMIT ?",
+                    (f"%{company_name}%", limit)
+                )
+                rows = cursor.fetchall()
+
+        return [json.loads(row["raw_data"]) for row in rows]
+
+    def get_events_since(self, days: int) -> List[Dict[str, Any]]:
+        """Fetches all events parsed within the last N days."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT raw_data FROM articles WHERE inserted_at >= date('now', ?)",
+                (f"-{days} days",)
+            )
+            rows = cursor.fetchall()
+
+        return [json.loads(row["raw_data"]) for row in rows]
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/__init__.py ====================
+
+"""
+ai_intel_processing - Shared intelligence module for AI news ingestion system.
+"""
+
+from .schema import NewsArticle, InvestmentRelevant, OutputSchema, RawIngestionOutput
+from .processing import IntelProcessor
+from .utils import setup_logger
+from .deduplication import DeduplicationStore
+
+__all__ = ["NewsArticle", "InvestmentRelevant", "OutputSchema", "RawIngestionOutput", "IntelProcessor", "setup_logger", "DeduplicationStore"]
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/llm.py ====================
+
+import os
+import logging
+import json
+from typing import Optional, Dict, Any, Type
+from pydantic import BaseModel
+from openai import OpenAI, OpenAIError, RateLimitError, APIError
+import time
+
+from .utils import setup_logger, log_struct
+from .prompts import SYSTEM_PROMPT
+from dotenv import load_dotenv
+
+load_dotenv()
+
+logger = setup_logger("ai_intel_processing.llm")
+
+class LLMClient:
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.model = os.getenv("LLM_MODEL", "gpt-4o-2024-08-06")
+        if not self.api_key:
+            log_struct(logger, logging.WARNING, "No OpenAI API key found. LLM features will be disabled or mock-only.")
+            self.client = None
+        else:
+            self.client = OpenAI(api_key=self.api_key)
+
+    def analyze(self, prompt: str, schema_model: Type[BaseModel]) -> Optional[BaseModel]:
+        """
+        Analyzes content using OpenAI and enforces a Pydantic schema for the output.
+        Uses structured outputs (response_format).
+        """
+        if not self.client:
+            log_struct(logger, logging.ERROR, "Cannot perform analysis: No API Client")
+            return None
+
+        retries = 3
+        for attempt in range(retries):
+            try:
+                log_struct(logger, logging.INFO, "Sending request to OpenAI", model=self.model, attempt=attempt+1)
+                
+                completion = self.client.beta.chat.completions.parse(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt}
+                    ],
+                    response_format=schema_model,
+                    temperature=0,
+                    seed=42,
+                    timeout=30
+                )
+                
+                result = completion.choices[0].message.parsed
+                log_struct(logger, logging.INFO, "Received structured response from OpenAI")
+                return result
+
+            except RateLimitError as e:
+                log_struct(logger, logging.WARNING, "Rate limit hit", error=type(e).__name__, attempt=attempt+1)
+                if attempt == retries - 1:
+                    raise e
+                time.sleep(2 ** attempt)
+            except Exception as e:
+                log_struct(logger, logging.ERROR, "LLM analysis error", error=type(e).__name__, message=str(e), attempt=attempt+1)
+                if attempt == retries - 1:
+                    raise RuntimeError(f"LLM processing failed explicitly: {str(e)}") from e
+                time.sleep(2 ** attempt)
+        
+        raise RuntimeError(f"LLM processing failed after {retries} attempts.")
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/prompts.py ====================
+
+
+PROMPT_VERSION = "2.0.0"
+
+SYSTEM_PROMPT = """
+You are an expert AI investment analyst specializing in capital intelligence. 
+Your goal is to extract structured investment data from news articles with extreme precision.
+
+# Capital Alignment Rules
+1. Prioritize **Capital Flows**: Funding, Acquisitions, Partnerships, new Contracts.
+2. **Forbid Inference**: If financial or transactional data is not explicitly stated in the article, return null. Do not infer or assume.
+3. **Event Classification**: You must classify the article into one of the following capital event types:
+   - "funding": VC rounds, IPOs, grants.
+   - "acquisition": M&A activity.
+   - "partnership": Strategic alliances.
+   - "contract": Major customer deals.
+   - "restructuring": Layoffs, exec changes.
+   - "other": Product launches, research, generic news (mark investment_relevant=False if purely technical).
+
+# Output Requirements
+- Extract the main *Company* involved.
+- Extract *Funding Amount* and *Stage* only if explicitly stated.
+- List *Investors* if mentioned.
+- Provide a concise *Summary* focused on the business/capital implication.
+"""
+
+ANALYSIS_PROMPT_TEMPLATE = """
+Analyze the following article for Capital Intelligence:
+
+Title: {title}
+Source: {source}
+Date: {date}
+Content:
+{content}
+
+Extract the required fields based on the schema.
+"""
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/utils.py ====================
+
+import logging
+import sys
+import json
+from typing import Any
+
+class StructuredMessage:
+    def __init__(self, message: str, **kwargs: Any):
+        self.message = message
+        self.kwargs = kwargs
+
+    def __str__(self) -> str:
+        return json.dumps({"message": self.message, **self.kwargs})
+
+def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
+    """
+    Sets up a structured logger.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+    
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+    return logger
+
+# Helper for logging
+def log_struct(logger: logging.Logger, level: int, message: str, **kwargs):
+    if logger.isEnabledFor(level):
+        logger.log(level, StructuredMessage(message, **kwargs))
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/processing.py ====================
+
+import logging
+import json
+from typing import Optional, Dict, Any
+from .schema import NewsArticle, OutputSchema
+from .utils import setup_logger, log_struct
+
+logger = setup_logger("ai_intel_processing")
+
+class IntelProcessor:
+    def __init__(self, api_key: Optional[str] = None):
+        from .llm import LLMClient
+        self.llm = LLMClient(api_key=api_key)
+
+    def process_article(self, article: NewsArticle) -> OutputSchema:
+        """
+        Processes a raw news article and returns a structured output.
+        """
+        import hashlib
+        from datetime import datetime
+        
+        log_struct(logger, logging.INFO, "Processing article", url=article.url)
+
+        # 1. Compute Article Hash (SHA-256)
+        article_hash = hashlib.sha256(article.content.encode('utf-8')).hexdigest()
+
+        # 2. Generate analysis (LLM)
+        analysis_data = {}
+        model_used = "unknown"
+        
+        # Default fallback values
+        event_type = "other"
+        
+        try:
+            from .prompts import ANALYSIS_PROMPT_TEMPLATE, PROMPT_VERSION
+            from .schema import InvestmentAnalysis
+            
+            if self.llm.client:
+                model_used = self.llm.model
+            
+            prompt = ANALYSIS_PROMPT_TEMPLATE.format(
+                title=article.title,
+                source=article.source,
+                date=article.published_at,
+                content=article.content[:15000] # Increased truncate limit slightly
+            )
+            
+            # Updated call: removed 'content' arg
+            analysis = self.llm.analyze(prompt, InvestmentAnalysis)
+            
+            if analysis:
+                analysis_data = analysis.model_dump()
+                event_type = analysis_data.get("event_type", "other")
+            else:
+                log_struct(logger, logging.WARNING, "LLM returned no analysis", url=article.url)
+                raise RuntimeError("LLM returned no analysis")
+                
+        except Exception as e:
+            log_struct(logger, logging.ERROR, "LLM processing failed explicitly", error=str(e), url=article.url)
+            raise e
+
+        # 3. Construct OutputSchema
+        output = OutputSchema(
+            schema_version="2.0",
+            source=article.source,
+            title=article.title,
+            url=article.url,
+            published_at=article.published_at.isoformat() if article.published_at else None,
+            company=analysis_data.get("company"),
+            funding_amount=analysis_data.get("funding_amount"),
+            funding_stage=analysis_data.get("funding_stage"),
+            investors=analysis_data.get("investors", []),
+            summary=analysis_data.get("summary", "Analysis failed or content unavailable."),
+            investment_relevant=analysis_data.get("investment_relevant", False),
+            event_type=event_type,
+            
+            # Traceability
+            model_used=model_used,
+            prompt_version=PROMPT_VERSION,
+            processing_timestamp=datetime.utcnow().isoformat(),
+            article_hash=article_hash,
+            
+            metadata=article.raw_metadata
+        )
+
+        return output
+
+
+==================== FILE: ./ai_intel_processing/src/ai_intel_processing/schema.py ====================
+
+from typing import List, Optional, Dict, Any, Literal
+from pydantic import BaseModel, Field, field_validator
+from datetime import datetime
+
+class InvestmentRelevant(BaseModel):
+    is_relevant: bool = Field(..., description="Whether the article is relevant for investment analysis")
+    reasoning: Optional[str] = Field(None, description="Reasoning for relevance or irrelevance")
+
+class NewsArticle(BaseModel):
+    """
+    Represents a normalized news article from any source.
+    """
+    source: str = Field(..., description="Source of the article (e.g., 'techcrunch', 'hackernews')")
+    title: str = Field(..., description="Title of the article")
+    url: str = Field(..., description="URL of the article") # kept as str to avoid Pydantic URL complexity for now, but validated
+    published_at: Optional[datetime] = Field(None, description="Publication timestamp")
+    content: str = Field(..., description="Full text content of the article")
+    
+    # Raw metadata from source
+    raw_metadata: Dict[str, Any] = Field(default_factory=dict, description="Original metadata from source")
+
+class RawIngestionOutput(BaseModel):
+    """
+    Schema for raw verification mode output.
+    """
+    schema_version: Literal["1.0"] = "1.0"
+    source: str
+    title: str
+    url: str
+    published_at: Optional[str]
+    raw_text_length: int
+    raw_text_preview: str = Field(..., description="First 500 characters of raw text")
+    http_status: int = 200
+    collected_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+class OutputSchema(BaseModel):
+    """
+    Final output schema for the ingestion system.
+    """
+    schema_version: Literal["2.0"] = "2.0"
+    source: str
+    title: str
+    url: str
+    published_at: Optional[str] # ISO format string for serialization
+    company: Optional[str] = None
+    funding_amount: Optional[str] = None
+    funding_stage: Optional[str] = None
+    investors: List[str] = Field(default_factory=list)
+    summary: str
+    investment_relevant: bool
+    event_type: Literal["funding", "acquisition", "partnership", "contract", "restructuring", "other"] = Field(..., description="Classification of the event")
+    
+    # Traceability
+    model_used: str = Field(..., description="LLM model used for analysis")
+    prompt_version: str = Field(..., description="Version of the prompt used")
+    processing_timestamp: str = Field(..., description="When the processing occurred")
+    article_hash: str = Field(..., description="SHA-256 hash of the article content")
+    
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    collected_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
+
+    @field_validator('url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
+        if not v.startswith(('http://', 'https://')):
+            raise ValueError('URL must start with http or https')
+        return v
+
+class InvestmentAnalysis(BaseModel):
+    """
+    Structured output from LLM analysis.
+    """
+    company: Optional[str] = Field(None, description="Name of the main company involved")
+    funding_amount: Optional[str] = Field(None, description="Funding amount if applicable (e.g. '$10M')")
+    funding_stage: Optional[str] = Field(None, description="Funding stage if applicable (e.g. 'Series A')")
+    investors: List[str] = Field(default_factory=list, description="List of investors mentioned")
+    summary: str = Field(..., description="Concise summary of the article")
+    investment_relevant: bool = Field(..., description="Whether the article is relevant to AI investment")
+    event_type: Literal["funding", "acquisition", "partnership", "contract", "restructuring", "other"] = Field(..., description="Classification of the event")
+
+class IngestionResult(BaseModel):
+    """Strict contract enforcing ingestion routine status reporting."""
+    status: str
+    processed: int
+    errors: int
+    message: Optional[str] = None

@@ -52,11 +52,11 @@ class IntelProcessor:
                 event_type = analysis_data.get("event_type", "other")
             else:
                 log_struct(logger, logging.WARNING, "LLM returned no analysis", url=article.url)
+                raise RuntimeError("LLM returned no analysis")
                 
         except Exception as e:
-            log_struct(logger, logging.ERROR, "LLM processing failed", error=str(e), url=article.url)
-            # We continue with empty analysis data rather than crashing
-            from .prompts import PROMPT_VERSION # Ensure we have it for fallback
+            log_struct(logger, logging.ERROR, "LLM processing failed explicitly", error=str(e), url=article.url)
+            raise e
 
         # 3. Construct OutputSchema
         output = OutputSchema(

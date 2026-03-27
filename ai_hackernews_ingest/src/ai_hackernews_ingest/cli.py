@@ -3,6 +3,7 @@ import json
 import os
 import time
 from datetime import datetime
+from typing import Optional
 from .client import fetch_top_stories, fetch_story_details
 from .filter import is_ai_story
 from .scraper import fetch_content_generic
@@ -13,22 +14,17 @@ from ai_intel_processing.deduplication import DeduplicationStore
 from ai_intel_processing.utils import setup_logger, log_struct
 import logging
 
+from ai_intel_processing.schema import IngestionResult
+
 logger = setup_logger("ai_hackernews_ingest.cli")
 
-@click.command()
-@click.option('--limit', default=20, help='Number of stories to check (not necessarily output).')
-@click.option('--output', default='./output', help='Output directory for JSONL files.')
-@click.option('--raw', is_flag=True, help='Output raw ingestion data without LLM processing.')
-def main(limit, output, raw):
-    """
-    Hacker News AI Ingestion CLI.
-    """
-    log_struct(logger, logging.INFO, "Starting Hacker News ingestion", limit=limit, output_dir=output, raw_mode=raw)
+def run_ingestion(limit: int, output: str, raw: bool, db_session: Optional[DatabaseStore] = None, job_id: Optional[str] = None) -> IngestionResult:
+    log_struct(logger, logging.INFO, "Starting Hacker News ingestion", limit=limit, output_dir=output, raw_mode=raw, job_id=job_id)
     
     os.makedirs(output, exist_ok=True)
     
     top_ids = fetch_top_stories(limit=limit * 2) # Fetch more to allow for filtering
-    db = DatabaseStore()
+    db = db_session if db_session else DatabaseStore()
     dedup = DeduplicationStore()
     processor = IntelProcessor()
     
@@ -46,7 +42,7 @@ def main(limit, output, raw):
             
         title = story.get("title", "")
         if is_ai_story(title):
-            log_struct(logger, logging.INFO, "Found AI story", title=title, id=story_id)
+            log_struct(logger, logging.INFO, "Found AI story", title=title, id=story_id, job_id=job_id)
             
             url = story.get("url")
             
@@ -91,6 +87,7 @@ def main(limit, output, raw):
                 output_file = os.path.join(output, "hackernews_data.jsonl")
                 with open(output_file, 'a') as f:
                     f.write(output_data.model_dump_json() + '\n')
+                db.mark_processed_raw(canonical_key, "hackernews", title, check_url)
                 count += 1
             else:
                 # Create NewsArticle
@@ -111,6 +108,11 @@ def main(limit, output, raw):
                     
                     output_data = processor.process_article(article)
                     db.save_article(canonical_key, output_data)
+                    
+                    output_file = os.path.join(output, "hackernews_data.jsonl")
+                    with open(output_file, 'a') as f:
+                        f.write(output_data.model_dump_json() + '\n')
+                        
                     count += 1
                     
                 except Exception as e:
@@ -120,7 +122,18 @@ def main(limit, output, raw):
             log_struct(logger, logging.DEBUG, "Skipping non-AI story", title=title)
 
     db.finish_run(run_id, "success", count, errors)
-    log_struct(logger, logging.INFO, "Ingestion complete", total_processed=count)
+    log_struct(logger, logging.INFO, "Ingestion complete", total_processed=count, job_id=job_id)
+    return IngestionResult(status="success", processed=count, errors=errors)
+
+@click.command()
+@click.option('--limit', default=20, help='Number of stories to check (not necessarily output).')
+@click.option('--output', default='./output', help='Output directory for JSONL files.')
+@click.option('--raw', is_flag=True, help='Output raw ingestion data without LLM processing.')
+def main(limit, output, raw):
+    """
+    Hacker News AI Ingestion CLI.
+    """
+    run_ingestion(limit, output, raw)
 
 if __name__ == "__main__":
     main()

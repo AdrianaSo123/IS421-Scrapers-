@@ -54,16 +54,15 @@ class LLMClient:
                 log_struct(logger, logging.INFO, "Received structured response from OpenAI")
                 return result
 
-            except RateLimitError:
-                log_struct(logger, logging.WARNING, "Rate limit hit", attempt=attempt+1)
-                time.sleep(2 ** attempt)
-            except OpenAIError as e:
-                log_struct(logger, logging.ERROR, "OpenAI API Error", error=str(e), attempt=attempt+1)
+            except RateLimitError as e:
+                log_struct(logger, logging.WARNING, "Rate limit hit", error=type(e).__name__, attempt=attempt+1)
                 if attempt == retries - 1:
                     raise e
-                time.sleep(1)
+                time.sleep(2 ** attempt)
             except Exception as e:
-                log_struct(logger, logging.ERROR, "Unexpected error during LLM analysis", error=str(e))
-                return None
+                log_struct(logger, logging.ERROR, "LLM analysis error", error=type(e).__name__, message=str(e), attempt=attempt+1)
+                if attempt == retries - 1:
+                    raise RuntimeError(f"LLM processing failed explicitly: {str(e)}") from e
+                time.sleep(2 ** attempt)
         
-        return None
+        raise RuntimeError(f"LLM processing failed after {retries} attempts.")

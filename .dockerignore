@@ -1,0 +1,19 @@
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+.git/
+.gitignore
+.DS_Store
+.env
+
+# Data artifacts
+data/
+*.sqlite
+*.db
+verification_data/
+output/
+docker_output/
+tests/
