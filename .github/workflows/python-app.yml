@@ -25,6 +25,7 @@ jobs:
         pip install -e ./ai_intel_processing
         pip install -e ./ai_hackernews_ingest
         pip install -e ./ai_techcrunch_ingest
+        pip install -e ./ai_capital_mcp
     - name: Test with pytest
       run: |
         pytest tests/

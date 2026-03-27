@@ -1,12 +1,17 @@
 {
   "mcpServers": {
     "capital-intelligence": {
-      "command": "/Users/adrianaso/is421 scrapers/.venv/bin/ai-capital-mcp",
-      "args": [],
-      "env": {
-        "OPENAI_API_KEY": "dummy",
-        "DB_PATH": "/Users/adrianaso/is421 scrapers/data/scrapers.db"
-      }
+      "command": "/usr/local/bin/docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "OPENAI_API_KEY=dummy",
+        "-v",
+        "/Users/adrianaso/is421 scrapers/data:/app/data",
+        "ai-capital-mcp:latest"
+      ]
     }
   }
 }
