@@ -38,7 +38,14 @@ pip install -e ./ai_capital_mcp
 The scrapers are orchestrated using Docker Compose (or standalone `docker run` commands) that mount a persistent `./data` volume for the `scrapers.db` database.
 
 ### Claude Desktop Integration (MCP)
-To give Claude Desktop access to your Capital Intelligence database, edit your `claude_desktop_config.json` to run the `ai-capital-mcp` container natively:
+To give Claude Desktop access to your Capital Intelligence database, you can use our automated setup script:
+
+```bash
+# Automatically detects paths and updates your Claude configuration
+./setup_mcp.sh
+```
+
+Alternatively, you can manually edit your `claude_desktop_config.json` (Mac: `~/Library/Application Support/Claude/claude_desktop_config.json`):
 
 ```json
 {

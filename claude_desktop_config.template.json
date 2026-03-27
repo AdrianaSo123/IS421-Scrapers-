@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "capital-intelligence": {
+      "command": "/usr/local/bin/docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "--env-file",
+        "{{PROJECT_ROOT}}/.env",
+        "-v",
+        "{{PROJECT_ROOT}}/data:/app/data",
+        "ai-capital-mcp:latest"
+      ]
+    }
+  }
+}
