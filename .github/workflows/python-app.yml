@@ -27,5 +27,8 @@ jobs:
         pip install -e ./ai_techcrunch_ingest
         pip install -e ./ai_capital_mcp
     - name: Test with pytest
+      env:
+        OPENAI_API_KEY: "dummy-key-for-ci"
+        DB_PATH: "/tmp/scrapers.db"
       run: |
         pytest tests/
