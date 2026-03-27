@@ -1,89 +1,68 @@
 # Capital Intelligence Engine
 
-A robust, modular, and deterministic AI news ingestion system designed to extract high-value capital event data.
+A robust, modular, and deterministic AI news ingestion system designed to extract high-value capital event data and expose it securely to AI Agents via the Model Context Protocol (MCP).
 
 ## Architecture
 
-The system consists of three modular Python packages:
+The system consists of **two distinct operational halves**, powered by four modular Python packages:
+
+### 1. The Background Scrapers
+Automated background Docker containers that run continuously on a schedule. They fetch, process, and store AI-focused market events into a centralized local database (`scrapers.db`).
 
 1.  **`ai_techcrunch_ingest`**: Fetches and extracts AI news from TechCrunch via RSS and HTML scraping.
-2.  **`ai_hackernews_ingest`**: Monitoring Hacker News for AI-related stories using the Firebase API and keyword filtering.
-3.  **`ai_intel_processing`**: The shared intelligence core that handles schema validation, data normalization, and LLM-based analysis (OpenAI).
+2.  **`ai_hackernews_ingest`**: Monitors Hacker News for AI-related stories using the Firebase API and keyword filtering.
+3.  **`ai_intel_processing`**: The shared intelligence core that handles strict Pydantic schema validation, data normalization, database structuring, and LLM-based analysis (via OpenAI).
 
-### Principles
+### 2. The MCP Tool Server
+The bridge that allows LLMs to interact with your data:
 
--   **Determinism**: Ingestion is 100% deterministic. LLM output uses `temperature=0` and `seed=42` to minimize variance.
--   **Capital Focus**: Optimized to extract Funding, Acquisitions, Partnerships, and Contracts.
--   **Explicit Schemas**: Enforces Pydantic Schema v2.0 for all outputs.
--   **Traceability**: Every record includes `model_used`, `prompt_version`, and `article_hash`.
+4. **`ai_capital_mcp`**: A native Model Context Protocol (MCP) server built with FastMCP. It securely exposes your `scrapers.db` data as explicitly defined tools to AI assistants like Claude Desktop. It provides tools to read the latest events, search companies, summarize broad market trends, and even command the scrapers to fetch fresh data on-demand.
 
-## Installation
+---
 
-The system is designed as a monorepo. Install the packages in editable mode:
+## Installation & Setup
 
-```bash
-pip install -e ai_intel_processing
-pip install -e ai_techcrunch_ingest
-pip install -e ai_hackernews_ingest
-```
+We recommend running the entire system via Docker to ensure environments remain predictable and isolated.
 
-## Usage
-
-### TechCrunch Ingestion
-
-Fetch the latest AI articles from TechCrunch:
+### Local Development (Python)
+If developing locally, install the packages in editable mode:
 
 ```bash
-ai-techcrunch --limit 10 --output ./data
+pip install -e ./ai_intel_processing
+pip install -e ./ai_techcrunch_ingest
+pip install -e ./ai_hackernews_ingest
+pip install -e ./ai_capital_mcp
 ```
 
-### Hacker News Ingestion
+### Background Scrapers (Docker)
+The scrapers are orchestrated using Docker Compose (or standalone `docker run` commands) that mount a persistent `./data` volume for the `scrapers.db` database.
 
-Fetch top AI stories from Hacker News:
-
-```bash
-ai-hn --limit 50 --output ./data
-```
-
-## Output Schema (v2.0)
-
-All output files (`.jsonl`) conform to the Version 2.0 schema:
+### Claude Desktop Integration (MCP)
+To give Claude Desktop access to your Capital Intelligence database, edit your `claude_desktop_config.json` to run the `ai-capital-mcp` container natively:
 
 ```json
 {
-  "schema_version": "2.0",
-  "source": "techcrunch",
-  "title": "Example Article",
-  "url": "https://example.com/article",
-  "published_at": "2026-02-18T10:00:00+00:00",
-  "company": "Example AI Corp",
-  "funding_amount": "$50M",
-  "funding_stage": "Series A",
-  "investors": ["VC Firm A"],
-  "summary": "...",
-  "investment_relevant": true,
-  "event_type": "funding",
-  "model_used": "gpt-4o-2024-08-06",
-  "prompt_version": "2.0.0",
-  "processing_timestamp": "2026-02-18T10:00:05.123456",
-  "article_hash": "sha256...",
-  "metadata": {...},
-  "collected_at": "..."
+  "mcpServers": {
+    "capital-intelligence": {
+      "command": "/usr/local/bin/docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "OPENAI_API_KEY=your_key_here",
+        "-v",
+        "/absolute/path/to/your/data:/app/data",
+        "ai-capital-mcp:latest"
+      ]
+    }
+  }
 }
 ```
 
-### Event Types
-- `funding`: VC rounds, IPOs, grants.
-- `acquisition`: M&A activity.
-- `partnership`: Strategic alliances.
-- `contract`: Major customer deals.
-- `restructuring`: Layoffs, exec changes.
-- `other`: Product launches, research, generic news.
+## Principles
 
-## Verification
-
-To verify determinism between two runs:
-
-```bash
-python3 verify_determinism.py run1.jsonl run2.jsonl --mode full
-```
+-   **Determinism**: LLM output uses `temperature=0` and `seed=42` to minimize variance.
+-   **Capital Focus**: Optimized to selectively identify **Funding, Acquisitions, Partnerships, Contracts**, and **Restructuring** events, filtering out generic noise.
+-   **Explicit Schemas**: Enforces Pydantic Schema v2.0 for all LLM extraction boundaries.
+-   **Thread Safety**: Robust SQLite connection handling allows the scrapers to write to `scrapers.db` seamlessly while the MCP server reads from it concurrently.
